@@ -1,0 +1,24 @@
+[project]
+name = "concerto"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pre-commit>=4.5.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.11,<0.11.0"]
+build-backend = "uv_build"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "W191", "E111", "E114", "E117", "D203", "D206", "D300", "Q000", "Q001", "Q002", "Q003", "COM812", "COM819", "ISC001",
+    "C901", "D100", "D101", "D102", "D103", "D104", "D106", "D107", "D211", "D213", "E501", "PLR0913", "PLR0915", "PLW0603"
+]
