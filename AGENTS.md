@@ -24,7 +24,7 @@ uv run python -m concerto   # FastAPI + uvicorn, defaults to 127.0.0.1:8000
 
 ## What this is
 
-A Slack bot that tracks concert links posted in channels, storing each link with per-user ticket status in SQLite. Reactions on link messages classify each user's status for that link: `:+1:`/`:thumbsup:` = has a ticket, `:question:`/`:grey_question:` = interested, `:pray:` = looking on TicketSwap. The bot only scrapes and stores; it does not post or pin any Slack messages.
+A Slack bot that tracks concert links posted in channels, storing each link with per-user ticket status in SQLite. Reactions on link messages classify each user's status for that link: `:+1:`/`:thumbsup:`/`:ticket:` = has a ticket, `:question:`/`:grey_question:` = interested, `:pray:` = looking on TicketSwap. The bot only scrapes and stores; it does not post or pin any Slack messages.
 
 `src/concerto/concert_scraper.py` is a standalone module/CLI that extracts band, date, and venue from concert pages across many Dutch venues (`python -m concerto.concert_scraper <url> ...`). It has no Slack dependency.
 
