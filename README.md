@@ -1,17 +1,16 @@
 # concerto
 
-Basic Slack bot that tracks concert links in any public or private channel where the bot is a member, and maintains a pinned summary message per channel.
+Basic Slack bot that tracks concert links in any public or private channel where the bot is a member, and stores them with per-user ticket status.
 
 ## Behavior
 - Monitors any channel the bot is in (public and private)
 - Extracts links from channel messages and adds them to a tracked list
-- Ensures a pinned bot message exists in each tracked channel
-- Updates the pinned summary whenever tracked data changes
 - On `member_joined_channel`, scans channel history for existing links and `:+1:` / `:question:` / `:pray:` reactions
 - `:+1:` (or `:thumbsup:`): user has a ticket
 - `:question:` (or `:grey_question:`): user is interested, no ticket yet
 - `:pray:`: user is trying to get a sold-out ticket via TicketSwap
-- Run `/concerto rebuild` in a channel to fully rescan that channel's history and regenerate the pinned summary
+- Run `/concerto rebuild` in a channel to fully rescan that channel's history
+- Tracked data is stored in SQLite only; the bot does not post or pin any messages
 
 ## Required environment variables
 - `SLACK_BOT_TOKEN`
@@ -34,7 +33,7 @@ PORT=8000
 ```
 
 ## Persistence
-- State is persisted in SQLite (links, ticket holders, interested users, and summary pin timestamp).
+- State is persisted in SQLite (links, ticket holders, and interested users).
 - Default database path is `./concerto.db` and can be overridden via `CONCERTO_DB_PATH`.
 
 ## Run
@@ -57,8 +56,5 @@ uv run python -m concerto
 - Add OAuth scopes:
   - `channels:history`
   - `groups:history`
-  - `chat:write`
-  - `pins:read`
-  - `pins:write`
   - `reactions:read`
 - Install the app to your workspace and invite it to channels you want to track

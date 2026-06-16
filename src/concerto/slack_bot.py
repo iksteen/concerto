@@ -33,7 +33,6 @@ def _spawn(coro: Coroutine[Any, Any, None]) -> None:
 
 
 SLACK_API_BASE = "https://slack.com/api"
-SUMMARY_MARKER = "[concerto-link-board]"
 PLUS_ONE_REACTIONS = {"+1", "thumbsup"}
 QUESTION_REACTIONS = {"question", "grey_question"}
 PRAY_REACTIONS = {"pray"}
@@ -50,7 +49,6 @@ class LinkEntry:
 
 @dataclass
 class ChannelBoard:
-    pin_ts: str | None = None
     links: dict[str, LinkEntry] = field(default_factory=dict)
 
 
@@ -66,11 +64,6 @@ class BoardRepository:
         await self._db.executescript(
             """
             PRAGMA journal_mode=WAL;
-
-            CREATE TABLE IF NOT EXISTS board_state (
-                channel_id TEXT PRIMARY KEY,
-                pin_ts TEXT
-            );
 
             CREATE TABLE IF NOT EXISTS links (
                 channel_id TEXT NOT NULL,
@@ -108,14 +101,6 @@ class BoardRepository:
 
     async def load_board(self, channel_id: str) -> ChannelBoard:
         board = ChannelBoard()
-
-        async with self._db.execute(
-            "SELECT pin_ts FROM board_state WHERE channel_id = ?",
-            (channel_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                board.pin_ts = row[0]
 
         async with self._db.execute(
             "SELECT url, source_message_ts FROM links WHERE channel_id = ?",
@@ -169,12 +154,6 @@ class BoardRepository:
                     entry.ticketswap_wanted.add(user_id)
 
     async def save_board(self, channel_id: str, board: ChannelBoard) -> None:
-        await self._db.execute(
-            "INSERT INTO board_state(channel_id, pin_ts) VALUES(?, ?) "
-            "ON CONFLICT(channel_id) DO UPDATE SET pin_ts = excluded.pin_ts",
-            (channel_id, board.pin_ts),
-        )
-
         await self._db.execute("DELETE FROM links WHERE channel_id = ?", (channel_id,))
         await self._db.execute(
             "DELETE FROM link_posters WHERE channel_id = ?", (channel_id,)
@@ -250,7 +229,6 @@ class SlackBotService:
         self._repository = repository
         self._boards: dict[str, ChannelBoard] = {}
         self._bot_user_id: str | None = None
-        self._workspace_url: str | None = None
         self._lock = asyncio.Lock()
 
     async def initialize(self) -> None:
@@ -260,7 +238,6 @@ class SlackBotService:
             msg = "Slack auth.test did not return user_id"
             raise SlackApiError(msg)
         self._bot_user_id = user_id
-        self._workspace_url = _normalize_workspace_url(auth_info.get("url"))
 
     async def handle_event(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type", ""))
@@ -308,7 +285,6 @@ class SlackBotService:
                 return
 
             await self._persist_locked(channel_id, board)
-            await self._update_summary_message_locked(channel_id, board)
 
     async def _handle_message_event(self, event: dict[str, Any]) -> None:
         if event.get("subtype"):
@@ -332,7 +308,6 @@ class SlackBotService:
                     entry.posters.add(user_id)
                 _set_earliest_source_message_ts(entry, message_ts)
             await self._persist_locked(channel_id, board)
-            await self._update_summary_message_locked(channel_id, board)
 
     async def _rebuild_board_from_history(self, channel_id: str) -> None:
         history_entries = await self._collect_history_link_entries(channel_id)
@@ -340,7 +315,6 @@ class SlackBotService:
             board = await self._get_board_locked(channel_id)
             board.links = history_entries
             await self._persist_locked(channel_id, board)
-            await self._update_summary_message_locked(channel_id, board)
 
     async def handle_rebuild_command(self, channel_id: str) -> None:
         if not _is_supported_channel(channel_id):
@@ -391,7 +365,6 @@ class SlackBotService:
                 _set_earliest_source_message_ts(entry, message_ts)
                 _apply_status_reaction(entry, reaction, user_id, added=added)
             await self._persist_locked(channel_id, board)
-            await self._update_summary_message_locked(channel_id, board)
 
     async def _get_board_locked(self, channel_id: str) -> ChannelBoard:
         board = self._boards.get(channel_id)
@@ -401,93 +374,6 @@ class SlackBotService:
         board = await self._repository.load_board(channel_id)
         self._boards[channel_id] = board
         return board
-
-    async def _update_summary_message_locked(
-        self, channel_id: str, board: ChannelBoard
-    ) -> None:
-        pin_ts = await self._ensure_summary_pin_locked(channel_id, board)
-        message = self._render_summary_message(channel_id, board)
-        try:
-            await self._api_call(
-                "chat.update",
-                {
-                    "channel": channel_id,
-                    "ts": pin_ts,
-                    "text": message,
-                },
-            )
-        except SlackApiError as exc:
-            if "message_not_found" not in str(exc):
-                raise
-            logger.warning(
-                "Summary pin %s not found in channel %s; recreating pinned summary message",
-                pin_ts,
-                channel_id,
-            )
-            board.pin_ts = None
-            await self._persist_locked(channel_id, board)
-            recreated_pin_ts = await self._ensure_summary_pin_locked(channel_id, board)
-            await self._api_call(
-                "chat.update",
-                {
-                    "channel": channel_id,
-                    "ts": recreated_pin_ts,
-                    "text": message,
-                },
-            )
-
-    async def _ensure_summary_pin_locked(
-        self, channel_id: str, board: ChannelBoard
-    ) -> str:
-        if board.pin_ts:
-            return board.pin_ts
-
-        try:
-            pins_response = await self._api_call("pins.list", {"channel": channel_id})
-            items = pins_response.get("items", [])
-            if isinstance(items, list):
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    message = item.get("message")
-                    if not isinstance(message, dict):
-                        continue
-                    text = str(message.get("text", ""))
-                    ts = str(message.get("ts", ""))
-                    if SUMMARY_MARKER in text and ts:
-                        board.pin_ts = ts
-                        await self._persist_locked(channel_id, board)
-                        return ts
-        except SlackApiError as exc:
-            if "invalid_arguments" not in str(exc):
-                raise
-            logger.warning(
-                "pins.list returned invalid_arguments for channel %s; posting new summary pin",
-                channel_id,
-            )
-
-        create_response = await self._api_call(
-            "chat.postMessage",
-            {
-                "channel": channel_id,
-                "text": self._render_summary_message(channel_id, board),
-            },
-        )
-        message_ts = str(create_response.get("ts", ""))
-        if not message_ts:
-            msg = "Slack did not return a message timestamp for summary post"
-            raise SlackApiError(msg)
-
-        await self._api_call(
-            "pins.add",
-            {
-                "channel": channel_id,
-                "timestamp": message_ts,
-            },
-        )
-        board.pin_ts = message_ts
-        await self._persist_locked(channel_id, board)
-        return message_ts
 
     async def _persist_locked(self, channel_id: str, board: ChannelBoard) -> None:
         await self._repository.save_board(channel_id, board)
@@ -604,45 +490,6 @@ class SlackBotService:
 
         return body
 
-    def _render_summary_message(self, channel_id: str, board: ChannelBoard) -> str:
-        lines = [
-            SUMMARY_MARKER,
-            "*Concert Link Board*",
-            "Add a message with a concert link to track it here.",
-            (
-                "React with `:+1:` when you have a ticket, `:question:` when interested, "
-                "or `:pray:` when looking on TicketSwap."
-            ),
-            "",
-        ]
-
-        if not board.links:
-            lines.append("No links tracked yet.")
-            return "\n".join(lines)
-
-        for index, link in enumerate(sorted(board.links), start=1):
-            entry = board.links[link]
-            ticket_mentions = _format_mentions(entry.ticket_holders)
-            interest_mentions = _format_mentions(entry.interested)
-            ticketswap_mentions = _format_mentions(entry.ticketswap_wanted)
-            if entry.source_message_ts:
-                permalink = _build_slack_message_permalink(
-                    workspace_url=self._workspace_url,
-                    channel_id=channel_id,
-                    message_ts=entry.source_message_ts,
-                )
-                lines.append(f"{index}. <{link}|{link}> <{permalink}|:link:>")
-            else:
-                lines.append(f"{index}. <{link}|{link}>")
-            lines.append(
-                "   "
-                f"tickets: {ticket_mentions} / "
-                f"interested: {interest_mentions} / "
-                f"ticketswap wanted: {ticketswap_mentions}"
-            )
-
-        return "\n".join(lines)
-
 
 def create_app() -> FastAPI:
     bot_token = _required_env("SLACK_BOT_TOKEN")
@@ -740,7 +587,7 @@ def create_app() -> FastAPI:
         _spawn(_run_rebuild_command(service, channel_id))
         return {
             "response_type": "ephemeral",
-            "text": "Rebuilding pinned summary from channel history. I will update the pin when done.",
+            "text": "Rescanning channel history for links.",
         }
 
     return app
@@ -812,13 +659,6 @@ def _extract_links(text: str) -> list[str]:
     ]
 
     return list(dict.fromkeys(links))
-
-
-def _format_mentions(user_ids: set[str]) -> str:
-    if not user_ids:
-        return "-"
-    mentions = [f"<@{user_id}>" for user_id in sorted(user_ids)]
-    return ", ".join(mentions)
 
 
 def _update_membership(group: set[str], user_id: str, *, added: bool) -> None:
@@ -914,25 +754,3 @@ def _ts_key(ts: str) -> tuple[int, int]:
     except ValueError:
         return (0, 0)
     return (numeric, 0)
-
-
-def _normalize_workspace_url(value: object) -> str | None:
-    if value is None:
-        return None
-    raw = str(value).strip()
-    if not raw:
-        return None
-    return raw.rstrip("/")
-
-
-def _build_slack_message_permalink(
-    workspace_url: str | None, channel_id: str, message_ts: str
-) -> str:
-    ts_raw = _normalize_ts(message_ts)
-    if not ts_raw:
-        return "https://slack.com"
-    ts_compact = ts_raw.replace(".", "")
-    if not ts_compact:
-        return "https://slack.com"
-    base_url = workspace_url or "https://slack.com"
-    return f"{base_url}/archives/{channel_id}/p{ts_compact}"

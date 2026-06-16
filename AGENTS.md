@@ -24,32 +24,34 @@ uv run python -m concerto   # FastAPI + uvicorn, defaults to 127.0.0.1:8000
 
 ## What this is
 
-A Slack bot that tracks concert links posted in channels and maintains one pinned summary message ("link board") per channel. Reactions on link messages classify each user's status for that link: `:+1:`/`:thumbsup:` = has a ticket, `:question:`/`:grey_question:` = interested, `:pray:` = looking on TicketSwap.
+A Slack bot that tracks concert links posted in channels, storing each link with per-user ticket status in SQLite. Reactions on link messages classify each user's status for that link: `:+1:`/`:thumbsup:` = has a ticket, `:question:`/`:grey_question:` = interested, `:pray:` = looking on TicketSwap. The bot only scrapes and stores; it does not post or pin any Slack messages.
+
+`src/concerto/concert_scraper.py` is a standalone module/CLI that extracts band, date, and venue from concert pages across many Dutch venues (`python -m concerto.concert_scraper <url> ...`). It has no Slack dependency.
 
 ## Architecture
 
-Everything lives in `src/concerto/slack_bot.py` (~900 lines); the other files are thin entry points:
-- `__init__.py` loads `.env` and calls `create_app()`, exposing the FastAPI `app`.
-- `__main__.py` runs that app under uvicorn (`HOST`/`PORT`).
+The Slack bot lives in `src/concerto/slack_bot.py`; the other files are thin entry points:
+- `__init__.py` is empty — importing the package (or the scraper submodule) has no side effects.
+- `__main__.py` calls `load_dotenv()` + `create_app()` inside `main()` and runs the app under uvicorn (`HOST`/`PORT`), so the Slack env is only needed to run the server.
 
 Three layers inside `slack_bot.py`:
 
-1. **FastAPI routes** (`create_app`): `/slack/events`, `/slack/commands`, `/healthz`. Every Slack request is HMAC-verified against `SLACK_SIGNING_SECRET` (`_is_valid_signature`, 5-minute timestamp window) before processing. Slack needs a fast reply, so event/command work is dispatched to a background `asyncio.create_task` and the route returns `{"ok": True}` immediately.
+1. **FastAPI routes** (`create_app`): `/slack/events`, `/slack/commands`, `/healthz`. Every Slack request is HMAC-verified against `SLACK_SIGNING_SECRET` (`_is_valid_signature`, 5-minute timestamp window) before processing. Slack needs a fast reply, so event/command work is dispatched to a background task via `_spawn` (which keeps a reference so the task is not GC'd) and the route returns `{"ok": True}` immediately.
 
-2. **`SlackBotService`**: in-memory state + Slack API orchestration. Caches a `ChannelBoard` per channel in `self._boards` and serializes all mutations behind one `asyncio.Lock` — methods suffixed `_locked` assume the lock is held. Slack calls go through `_api_call` (raises `SlackApiError` on `ok: false`). `_render_summary_message` produces the pin text, which always begins with the `SUMMARY_MARKER` constant so an existing pin can be rediscovered via `pins.list`.
+2. **`SlackBotService`**: in-memory state + Slack API orchestration. Caches a `ChannelBoard` per channel in `self._boards` and serializes all mutations behind one `asyncio.Lock` — methods suffixed `_locked` assume the lock is held. Slack calls go through `_api_call` (raises `SlackApiError` on `ok: false`); only read calls (`auth.test`, `conversations.history`) are used.
 
-3. **`BoardRepository`**: SQLite persistence via `aiosqlite` (WAL mode), spread across four tables (`board_state`, `links`, `link_posters`, `link_statuses`). `save_board` is a full delete-and-reinsert of a channel's rows in one transaction.
+3. **`BoardRepository`**: SQLite persistence via `aiosqlite` (WAL mode), spread across three tables (`links`, `link_posters`, `link_statuses`). `save_board` is a full delete-and-reinsert of a channel's rows in one transaction.
 
 ### Domain model
 - `LinkEntry`: per-URL membership sets — `posters`, `ticket_holders`, `interested`, `ticketswap_wanted` — plus `source_message_ts`.
-- `ChannelBoard`: `pin_ts` (pinned summary message ts) + `dict[url, LinkEntry]`.
+- `ChannelBoard`: `dict[url, LinkEntry]`.
 
 ### Status rules (`_apply_status_reaction`)
 Statuses are mutually exclusive and ticket-holder wins: adding `:+1:` clears `interested`/`ticketswap_wanted`; `:question:`/`:pray:` are ignored for users who already hold a ticket. Keep this precedence intact when changing reaction handling.
 
 ### Data flows
-- **Message with links** → add poster, set earliest `source_message_ts`, re-render pin.
-- **Reaction add/remove** → fetch reacted message text, re-extract links, apply status, re-render.
+- **Message with links** → add poster, set earliest `source_message_ts`, persist.
+- **Reaction add/remove** → fetch reacted message text, re-extract links, apply status, persist.
 - **Bot joins channel** (`member_joined_channel` for the bot's own user) → scan full history and *merge* into the board.
 - **`/concerto rebuild`** (also accepts `rescan`) → scan full history and *replace* the board.
 
