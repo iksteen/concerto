@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as dt
 import json
 import logging
 import os
 import re
 from dataclasses import dataclass, field
+from html import escape
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 import aiohttp
 import aiosqlite
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 
 from concerto import concert_scraper
 
@@ -74,6 +77,18 @@ class LinkEntry:
 @dataclass
 class ChannelBoard:
     links: dict[str, LinkEntry] = field(default_factory=dict)
+
+
+@dataclass
+class EventView:
+    """An immutable snapshot of a tracked link for the overview page."""
+
+    url: str
+    band: str | None
+    venue: str | None
+    expired: bool
+    message_url: str | None
+    date: dt.date | None
 
 
 class SlackApiError(RuntimeError):
@@ -274,6 +289,7 @@ class SlackBotService:
         self._repository = repository
         self._boards: dict[str, ChannelBoard] = {}
         self._bot_user_id: str | None = None
+        self._workspace_url: str | None = None
         self._metadata_tried: set[str] = set()
         self._lock = asyncio.Lock()
 
@@ -284,6 +300,24 @@ class SlackBotService:
             msg = "Slack auth.test did not return user_id"
             raise SlackApiError(msg)
         self._bot_user_id = user_id
+        self._workspace_url = _normalize_workspace_url(auth_info.get("url"))
+
+    async def event_views(self, channel_id: str) -> list[EventView]:
+        async with self._lock:
+            board = await self._get_board_locked(channel_id)
+            return [
+                EventView(
+                    url=url,
+                    band=entry.band,
+                    venue=entry.venue,
+                    expired=entry.expired,
+                    message_url=_message_permalink(
+                        self._workspace_url, channel_id, entry.source_message_ts
+                    ),
+                    date=_parse_iso_date(entry.event_date),
+                )
+                for url, entry in board.links.items()
+            ]
 
     async def handle_event(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type", ""))
@@ -707,7 +741,7 @@ def create_app() -> FastAPI:
     database_path = os.getenv("CONCERTO_DB_PATH", "./concerto.db")
 
     @contextlib.asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(_: FastAPI) -> AsyncIterator[dict[str, Any]]:
         timeout = aiohttp.ClientTimeout(total=WEB_API_TIMEOUT_SECONDS)
         async with (
             aiohttp.ClientSession(timeout=timeout) as session,
@@ -725,7 +759,7 @@ def create_app() -> FastAPI:
             # Slack is handled over Socket Mode, running alongside the HTTP app.
             socket_task = asyncio.create_task(service.run_socket_mode())
             try:
-                yield
+                yield {"service": service}
             finally:
                 socket_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -740,6 +774,16 @@ def create_app() -> FastAPI:
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/board/{channel_id}", response_class=HTMLResponse)
+    async def board(channel_id: str, request: Request) -> str:
+        service = request.state.service
+        if not isinstance(service, SlackBotService):
+            raise HTTPException(status_code=500, detail="service not initialized")
+        if not _is_supported_channel(channel_id):
+            raise HTTPException(status_code=404, detail="unknown channel")
+        views = await service.event_views(channel_id)
+        return _render_overview(channel_id, views)
 
     return app
 
@@ -876,6 +920,164 @@ def _opt_str(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _parse_iso_date(value: str | None) -> dt.date | None:
+    if not value:
+        return None
+    try:
+        return dt.date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _normalize_workspace_url(value: object) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip().rstrip("/")
+    return raw or None
+
+
+def _message_permalink(
+    workspace_url: str | None, channel_id: str, message_ts: str | None
+) -> str | None:
+    ts = _normalize_ts(message_ts)
+    if not workspace_url or not ts:
+        return None
+    return f"{workspace_url}/archives/{channel_id}/p{ts.replace('.', '')}"
+
+
+_OVERVIEW_CSS = """
+:root {
+  --bg: #0b0d12; --card: #161a23; --line: #232838;
+  --text: #e8eaf0; --muted: #8a90a2; --accent: #ff5c7c;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: radial-gradient(1100px 600px at 50% -10%, #1b2133, var(--bg));
+}
+.top { text-align: center; padding: 56px 20px 8px; }
+.top h1 {
+  margin: 0; font-size: 2.4rem; font-weight: 800; letter-spacing: -0.02em;
+  background: linear-gradient(90deg, #ff5c7c, #a78bfa);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.sub { color: var(--muted); margin: 10px 0 0; font-size: 0.95rem; }
+main { max-width: 760px; margin: 0 auto; padding: 24px 16px 72px; }
+.section {
+  color: var(--muted); font-size: 0.74rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.09em; margin: 28px 6px 12px;
+}
+.events { display: flex; flex-direction: column; gap: 12px; }
+.card {
+  display: flex; gap: 16px; align-items: center; padding: 14px 16px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  transition: transform .12s ease, border-color .12s ease;
+}
+.card:hover { transform: translateY(-2px); border-color: var(--accent); }
+.date {
+  flex: 0 0 62px; text-align: center; display: flex; flex-direction: column;
+  line-height: 1.1; background: #0f131b; border-radius: 10px; padding: 8px 6px;
+}
+.date .dow { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; }
+.date .dom { font-size: 1.5rem; font-weight: 800; }
+.date .moy { font-size: 0.68rem; color: var(--muted); }
+.date.tba .dom { font-size: 0.95rem; color: var(--accent); padding: 6px 0; }
+.meta { flex: 1 1 auto; min-width: 0; }
+.band { font-size: 1.14rem; font-weight: 650; word-break: break-word; }
+.venue { color: var(--muted); font-size: 0.92rem; margin: 2px 0 9px; }
+.links { display: flex; gap: 8px; flex-wrap: wrap; }
+.link {
+  font-size: 0.8rem; text-decoration: none; color: var(--text);
+  background: #0f131b; border: 1px solid var(--line);
+  padding: 4px 11px; border-radius: 999px;
+}
+.link:hover { border-color: var(--accent); color: var(--accent); }
+.empty { text-align: center; color: var(--muted); padding: 64px 0; }
+"""
+
+
+def _fallback_name(url: str) -> str:
+    return escape(urlsplit(url).hostname or url)
+
+
+def _render_date_badge(date: dt.date | None) -> str:
+    if date is None:
+        return '<div class="date tba"><span class="dom">TBA</span></div>'
+    return (
+        '<div class="date">'
+        f'<span class="dow">{date:%a}</span>'
+        f'<span class="dom">{date:%d}</span>'
+        f'<span class="moy">{date:%b %Y}</span>'
+        "</div>"
+    )
+
+
+def _render_event_card(view: EventView) -> str:
+    name = escape(view.band) if view.band else _fallback_name(view.url)
+    venue = escape(view.venue) if view.venue else "&mdash;"
+    links = [
+        f'<a class="link" href="{escape(view.url)}" '
+        'target="_blank" rel="noopener">Event &#8599;</a>'
+    ]
+    if view.message_url:
+        links.append(
+            f'<a class="link" href="{escape(view.message_url)}" '
+            'target="_blank" rel="noopener">Slack &#8599;</a>'
+        )
+    return (
+        '<article class="card">'
+        f"{_render_date_badge(view.date)}"
+        '<div class="meta">'
+        f'<div class="band">{name}</div>'
+        f'<div class="venue">{venue}</div>'
+        f'<div class="links">{" ".join(links)}</div>'
+        "</div>"
+        "</article>"
+    )
+
+
+def _render_section(title: str, views: list[EventView]) -> str:
+    cards = "\n".join(_render_event_card(view) for view in views)
+    return (
+        f'<div class="section">{escape(title)}</div><div class="events">{cards}</div>'
+    )
+
+
+def _render_overview(channel_id: str, views: list[EventView]) -> str:
+    today = dt.datetime.now(tz=dt.UTC).date()
+    upcoming = [
+        view
+        for view in views
+        if not view.expired and (view.date is None or view.date >= today)
+    ]
+    undated = [view for view in upcoming if view.date is None]
+    dated = sorted(
+        (view for view in upcoming if view.date is not None),
+        key=lambda view: view.date or dt.date.min,
+    )
+
+    sections = ""
+    if undated:
+        sections += _render_section("Date to be announced", undated)
+    if dated:
+        sections += _render_section("Upcoming", dated)
+    body = sections or '<div class="empty">No upcoming events tracked yet.</div>'
+
+    plural = "" if len(upcoming) == 1 else "s"
+    return (
+        "<!doctype html>"
+        '<html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>Upcoming concerts</title>"
+        f"<style>{_OVERVIEW_CSS}</style></head><body>"
+        '<header class="top"><h1>Upcoming concerts</h1>'
+        f'<p class="sub">{len(upcoming)} event{plural} &middot; '
+        f"{escape(channel_id)}</p></header>"
+        f"<main>{body}</main></body></html>"
+    )
 
 
 def _normalize_ts(value: object) -> str | None:
