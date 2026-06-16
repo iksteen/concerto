@@ -517,7 +517,10 @@ def parse(html: str, url: str) -> ConcertInfo:
 # --------------------------------------------------------------------------- #
 # Fetching
 # --------------------------------------------------------------------------- #
-GONE_STATUS = {404, 410}
+# Statuses that mean the event is gone (removed/past), not a transient error.
+# 401 is included because some sites (e.g. Ticketmaster) return it for removed
+# event pages, which are inaccessible even in a browser.
+GONE_STATUS = {401, 404, 410}
 HTTP_ERROR_STATUS = 400
 
 

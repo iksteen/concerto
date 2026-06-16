@@ -50,7 +50,7 @@ Three layers inside `slack_bot.py`:
 Statuses are mutually exclusive and ticket-holder wins: adding `:+1:` clears `interested`/`ticketswap_wanted`; `:question:`/`:pray:` are ignored for users who already hold a ticket. Keep this precedence intact when changing reaction handling.
 
 ### Metadata enrichment (`_enrich_links`)
-After links are persisted, `_enrich_links` runs the concert scraper (`concert_scraper.scrape`, reusing the bot's `aiohttp` session) **outside the lock** — never scrape while holding `self._lock`. It scrapes a URL at most once per process (`self._metadata_tried`) and skips links already resolved (`is_resolved` = has metadata or is expired); results are merged back and persisted under the lock. A scrape returns `expired=True` when the page 404s/410s or redirects to an ancestor path (event removed); scrape failures are logged and ignored — enrichment must never break link tracking.
+After links are persisted, `_enrich_links` runs the concert scraper (`concert_scraper.scrape`, reusing the bot's `aiohttp` session) **outside the lock** — never scrape while holding `self._lock`. It scrapes a URL at most once per process (`self._metadata_tried`) and skips links already resolved (`is_resolved` = has metadata or is expired); results are merged back and persisted under the lock. A scrape returns `expired=True` when the page is gone (404/410/401) or redirects to an ancestor path (event removed); scrape failures are logged and ignored — enrichment must never break link tracking.
 
 ### Data flows
 - **Message with links** → add poster, set earliest `source_message_ts`, persist, then enrich.

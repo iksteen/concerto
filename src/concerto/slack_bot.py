@@ -462,8 +462,8 @@ class SlackBotService:
         try:
             info = await concert_scraper.scrape(url, self._session)
         except (concert_scraper.ScrapeError, aiohttp.ClientError, TimeoutError) as exc:
-            # HTTP errors (e.g. Ticketmaster /event/ 401s) and network blips are
-            # expected and unactionable; log concisely without a traceback.
+            # Other HTTP errors (5xx, etc.) and network blips are expected and
+            # unactionable; log concisely without a traceback.
             logger.warning("Could not scrape %s: %s", url, exc)
             return None
         logger.debug(
