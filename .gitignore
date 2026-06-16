@@ -11,3 +11,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Secrets
+.env
+
+# Local database
+concerto.db
+concerto.db-shm
+concerto.db-wal
