@@ -11,7 +11,7 @@ repos:
       - id: mypy
         name: mypy
         language: system
-        entry: poetry run mypy
+        entry: uv run mypy
         args:
           - --ignore-missing-imports
           - --strict
