@@ -732,12 +732,15 @@ def _extract_links(text: str) -> list[str]:
     if not text:
         return []
 
+    # Slack wraps URLs as <url> or <url|label>; capture just the url.
     links = [
         match.strip()
         for match in re.findall(r"<((?:https?://)[^>|]+)(?:\|[^>]+)?>", text)
     ]
+    # Bare URLs (not Slack-wrapped). Exclude "|" so a wrapped <url|label> is
+    # not re-captured here as "url|label".
     links += [
-        match.rstrip('.,!?:;)"]') for match in re.findall(r"https?://[^\s<>]+", text)
+        match.rstrip('.,!?:;)"]') for match in re.findall(r"https?://[^\s<>|]+", text)
     ]
 
     return list(dict.fromkeys(links))
