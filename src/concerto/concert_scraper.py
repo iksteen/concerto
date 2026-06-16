@@ -27,6 +27,9 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36 concerto-scraper"
 )
 REQUEST_TIMEOUT_SECONDS = 20
+# Some sites (e.g. Ticketmaster) send headers larger than aiohttp's 8 KiB
+# default, which otherwise fails the request.
+MAX_HEADER_BYTES = 32768
 _DAYS_IN_MONTH = 31
 
 _MONTHS: dict[str, int] = {
@@ -480,6 +483,7 @@ PARSERS: dict[str, Callable[[str, str], ConcertInfo]] = {
     "bibelot.net": parse_json_ld,
     "dehelling.nl": parse_json_ld,
     "dedoelen.nl": parse_json_ld,
+    "ticketmaster.nl": parse_json_ld,
     "paard.nl": _json_ld_with_venue("Paard"),
     "amare.nl": _json_ld_with_venue("Amare"),
     "013.nl": _json_ld_with_venue("013"),
@@ -544,7 +548,9 @@ async def _fetch(session: aiohttp.ClientSession, url: str) -> str | None:
 async def scrape(url: str, session: aiohttp.ClientSession | None = None) -> ConcertInfo:
     if session is None:
         timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-        async with aiohttp.ClientSession(timeout=timeout) as owned_session:
+        async with aiohttp.ClientSession(
+            timeout=timeout, max_field_size=MAX_HEADER_BYTES
+        ) as owned_session:
             return await scrape(url, owned_session)
     html = await _fetch(session, url)
     if html is None:
@@ -554,7 +560,9 @@ async def scrape(url: str, session: aiohttp.ClientSession | None = None) -> Conc
 
 async def scrape_many(urls: Iterable[str]) -> list[ConcertInfo | ScrapeError]:
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(
+        timeout=timeout, max_field_size=MAX_HEADER_BYTES
+    ) as session:
 
         async def run(url: str) -> ConcertInfo | ScrapeError:
             try:

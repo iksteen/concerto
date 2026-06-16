@@ -750,7 +750,9 @@ def create_app() -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncIterator[dict[str, Any]]:
         timeout = aiohttp.ClientTimeout(total=WEB_API_TIMEOUT_SECONDS)
         async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
+            aiohttp.ClientSession(
+                timeout=timeout, max_field_size=concert_scraper.MAX_HEADER_BYTES
+            ) as session,
             aiosqlite.connect(database_path) as db,
         ):
             repository = BoardRepository(db)
