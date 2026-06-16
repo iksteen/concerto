@@ -36,7 +36,7 @@ WEB_API_TIMEOUT_SECONDS = 20
 SOCKET_HEARTBEAT_SECONDS = 30
 SOCKET_RECONNECT_DELAY_SECONDS = 1
 PLUS_ONE_REACTIONS = {"+1", "thumbsup", "ticket"}
-QUESTION_REACTIONS = {"question", "grey_question"}
+QUESTION_REACTIONS = {"question", "grey_question", "eyes"}
 PRAY_REACTIONS = {"pray"}
 
 # Links on these domains (and their subdomains) are never tracked.

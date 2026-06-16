@@ -8,7 +8,7 @@ Basic Slack bot that tracks concert links in any public or private channel where
 - Scrapes each tracked link for concert metadata (band, date, venue) and stores it alongside the link
 - On `member_joined_channel`, scans channel history for existing links and `:+1:` / `:question:` / `:pray:` reactions
 - `:+1:` (or `:thumbsup:` / `:ticket:`): user has a ticket
-- `:question:` (or `:grey_question:`): user is interested, no ticket yet
+- `:question:` (or `:grey_question:` / `:eyes:`): user is interested, no ticket yet
 - `:pray:`: user is trying to get a sold-out ticket via TicketSwap
 - Run `/concerto rebuild` in a channel to fully rescan that channel's history
 - Tracked data is stored in SQLite only; the bot does not post or pin any messages
