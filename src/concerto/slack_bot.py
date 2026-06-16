@@ -8,6 +8,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import aiohttp
 import aiosqlite
@@ -743,7 +744,12 @@ def _extract_links(text: str) -> list[str]:
         match.rstrip('.,!?:;)"]') for match in re.findall(r"https?://[^\s<>|]+", text)
     ]
 
-    return list(dict.fromkeys(links))
+    return [url for url in dict.fromkeys(links) if not _is_slack_url(url)]
+
+
+def _is_slack_url(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower()
+    return host == "slack.com" or host.endswith(".slack.com")
 
 
 def _update_membership(group: set[str], user_id: str, *, added: bool) -> None:
