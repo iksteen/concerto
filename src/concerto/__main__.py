@@ -18,4 +18,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    # Scope LOG_LEVEL to our logger so DEBUG does not enable noisy library logs.
+    logging.getLogger("concerto").setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
     main()

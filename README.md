@@ -25,6 +25,7 @@ Optional:
 - `HOST` (default `127.0.0.1`)
 - `PORT` (default `8000`)
 - `CONCERTO_DB_PATH` (default `./concerto.db`)
+- `LOG_LEVEL` (default `INFO`; set `DEBUG` to log incoming events and scrape results)
 
 ## Environment file
 - `.env` is loaded automatically at startup via `python-dotenv`.

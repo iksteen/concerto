@@ -411,10 +411,18 @@ class SlackBotService:
 
     async def _scrape_metadata(self, url: str) -> concert_scraper.ConcertInfo | None:
         try:
-            return await concert_scraper.scrape(url, self._session)
+            info = await concert_scraper.scrape(url, self._session)
         except (concert_scraper.ScrapeError, aiohttp.ClientError, TimeoutError):
             logger.warning("Failed to scrape metadata for %s", url, exc_info=True)
             return None
+        logger.debug(
+            "Scraped %s -> band=%r date=%s venue=%r",
+            url,
+            info.band,
+            info.date,
+            info.venue,
+        )
+        return info
 
     async def _enrich_links(self, channel_id: str, urls: list[str]) -> None:
         async with self._lock:
@@ -430,6 +438,9 @@ class SlackBotService:
         if not pending:
             return
 
+        logger.debug(
+            "Enriching %d link(s) in %s: %s", len(pending), channel_id, pending
+        )
         scraped = {
             url: info
             for url in pending
@@ -635,8 +646,21 @@ class SlackBotService:
             await ws.send_json({"envelope_id": envelope_id})
             event = payload.get("event")
             if isinstance(event, dict):
+                logger.debug(
+                    "Event received: type=%s subtype=%s channel=%s user=%s",
+                    event.get("type"),
+                    event.get("subtype"),
+                    event.get("channel"),
+                    event.get("user"),
+                )
                 _spawn(_run_event(self, event))
         else:
+            logger.debug(
+                "Slash command received: command=%s text=%r channel=%s",
+                payload.get("command"),
+                payload.get("text"),
+                payload.get("channel_id"),
+            )
             await ws.send_json(
                 {"envelope_id": envelope_id, "payload": self._command_response(payload)}
             )
