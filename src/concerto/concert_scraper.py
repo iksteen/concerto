@@ -283,6 +283,8 @@ def _event_to_info(obj: dict[str, object], url: str) -> ConcertInfo:
     if isinstance(start, str):
         info.date, info.raw_date = parse_date(start)
     location = obj.get("location")
+    if isinstance(location, list) and location:
+        location = location[0]
     if isinstance(location, dict):
         venue = location.get("name")
         if isinstance(venue, str) and venue.strip():
@@ -479,6 +481,7 @@ PARSERS: dict[str, Callable[[str, str], ConcertInfo]] = {
     "amare.nl": _json_ld_with_venue("Amare"),
     "013.nl": _json_ld_with_venue("013"),
     "musicon.nl": _json_ld_with_venue("Musicon"),
+    "effenaar.nl": _json_ld_with_venue("Effenaar"),
     "patronaat.nl": parse_patronaat,
     "p60.nl": parse_p60,
     "nobel.nl": _meta_parser("Nobel"),
