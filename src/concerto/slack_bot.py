@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
+import contextlib
 import json
 import logging
 import os
 import re
-import time
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs
 
 import aiohttp
 import aiosqlite
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI
 
 from concerto import concert_scraper
 
@@ -35,6 +31,9 @@ def _spawn(coro: Coroutine[Any, Any, None]) -> None:
 
 
 SLACK_API_BASE = "https://slack.com/api"
+WEB_API_TIMEOUT_SECONDS = 20
+SOCKET_HEARTBEAT_SECONDS = 30
+SOCKET_RECONNECT_DELAY_SECONDS = 1
 PLUS_ONE_REACTIONS = {"+1", "thumbsup"}
 QUESTION_REACTIONS = {"question", "grey_question"}
 PRAY_REACTIONS = {"pray"}
@@ -246,10 +245,12 @@ class SlackBotService:
     def __init__(
         self,
         bot_token: str,
+        app_token: str,
         session: aiohttp.ClientSession,
         repository: BoardRepository,
     ) -> None:
         self._bot_token = bot_token
+        self._app_token = app_token
         self._session = session
         self._repository = repository
         self._boards: dict[str, ChannelBoard] = {}
@@ -537,9 +538,11 @@ class SlackBotService:
 
         return links_data
 
-    async def _api_call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _api_call(
+        self, method: str, payload: dict[str, Any], *, token: str | None = None
+    ) -> dict[str, Any]:
         headers = {
-            "Authorization": f"Bearer {self._bot_token}",
+            "Authorization": f"Bearer {token or self._bot_token}",
             "Content-Type": "application/json; charset=utf-8",
         }
 
@@ -561,15 +564,107 @@ class SlackBotService:
 
         return body
 
+    async def _open_socket_url(self) -> str:
+        response = await self._api_call(
+            "apps.connections.open", {}, token=self._app_token
+        )
+        url = str(response.get("url", ""))
+        if not url:
+            msg = "Slack apps.connections.open did not return a url"
+            raise SlackApiError(msg)
+        return url
+
+    async def run_socket_mode(self) -> None:
+        # The websocket is long-lived, so it gets its own session without a
+        # total timeout; heartbeat pings detect a dead connection.
+        ws_timeout = aiohttp.ClientTimeout(total=None, sock_connect=15)
+        async with aiohttp.ClientSession(timeout=ws_timeout) as ws_session:
+            while True:
+                try:
+                    url = await self._open_socket_url()
+                    async with ws_session.ws_connect(
+                        url, heartbeat=SOCKET_HEARTBEAT_SECONDS
+                    ) as ws:
+                        logger.info("Connected to Slack Socket Mode")
+                        await self._consume_socket(ws)
+                except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
+                    logger.warning("Socket Mode connection lost: %s", exc)
+                await asyncio.sleep(SOCKET_RECONNECT_DELAY_SECONDS)
+
+    async def _consume_socket(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        async for message in ws:
+            if message.type is not aiohttp.WSMsgType.TEXT:
+                continue
+            try:
+                data = json.loads(message.data)
+            except (json.JSONDecodeError, ValueError):
+                logger.warning("Ignoring malformed Socket Mode frame")
+                continue
+            if isinstance(data, dict) and not await self._dispatch_socket_message(
+                ws, data
+            ):
+                return
+
+    async def _dispatch_socket_message(
+        self, ws: aiohttp.ClientWebSocketResponse, data: dict[str, Any]
+    ) -> bool:
+        # Returns False when Slack asks us to reconnect.
+        message_type = str(data.get("type", ""))
+        if message_type == "disconnect":
+            logger.info("Slack requested reconnect: %s", data.get("reason"))
+            return False
+        if message_type not in {"events_api", "slash_commands"}:
+            return True
+
+        envelope_id = data.get("envelope_id")
+        payload = data.get("payload")
+        if not isinstance(envelope_id, str) or not isinstance(payload, dict):
+            return True
+
+        if message_type == "events_api":
+            await ws.send_json({"envelope_id": envelope_id})
+            event = payload.get("event")
+            if isinstance(event, dict):
+                _spawn(_run_event(self, event))
+        else:
+            await ws.send_json(
+                {"envelope_id": envelope_id, "payload": self._command_response(payload)}
+            )
+        return True
+
+    def _command_response(self, payload: dict[str, Any]) -> dict[str, str]:
+        command = str(payload.get("command", "")).strip()
+        text = str(payload.get("text", "")).strip().lower()
+        channel_id = str(payload.get("channel_id", "")).strip()
+
+        if command != "/concerto":
+            return {
+                "response_type": "ephemeral",
+                "text": "Unsupported command. Use /concerto rebuild",
+            }
+        if text not in {"rebuild", "rescan"}:
+            return {"response_type": "ephemeral", "text": "Usage: /concerto rebuild"}
+        if not _is_supported_channel(channel_id):
+            return {
+                "response_type": "ephemeral",
+                "text": "This command only works in public/private channels.",
+            }
+
+        _spawn(_run_rebuild_command(self, channel_id))
+        return {
+            "response_type": "ephemeral",
+            "text": "Rescanning channel history for links.",
+        }
+
 
 def create_app() -> FastAPI:
     bot_token = _required_env("SLACK_BOT_TOKEN")
-    signing_secret = _required_env("SLACK_SIGNING_SECRET")
+    app_token = _required_env("SLACK_APP_TOKEN")
     database_path = os.getenv("CONCERTO_DB_PATH", "./concerto.db")
 
-    @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[dict[str, Any]]:
-        timeout = aiohttp.ClientTimeout(total=20)
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        timeout = aiohttp.ClientTimeout(total=WEB_API_TIMEOUT_SECONDS)
         async with (
             aiohttp.ClientSession(timeout=timeout) as session,
             aiosqlite.connect(database_path) as db,
@@ -578,88 +673,29 @@ def create_app() -> FastAPI:
             await repository.init()
             service = SlackBotService(
                 bot_token=bot_token,
+                app_token=app_token,
                 session=session,
                 repository=repository,
             )
             await service.initialize()
-            yield {"service": service, "signing_secret": signing_secret}
+            # Slack is handled over Socket Mode, running alongside the HTTP app.
+            socket_task = asyncio.create_task(service.run_socket_mode())
+            try:
+                yield
+            finally:
+                socket_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await socket_task
 
     app = FastAPI(lifespan=lifespan)
+
+    @app.get("/")
+    async def index() -> dict[str, str]:
+        return {"message": "Hello world"}
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
-
-    @app.post("/slack/events", response_model=None)
-    async def slack_events(request: Request) -> Response | dict[str, bool]:
-        signing_secret_from_state = str(request.state.signing_secret)
-        payload_bytes = await request.body()
-
-        if not _is_valid_signature(request, payload_bytes, signing_secret_from_state):
-            raise HTTPException(status_code=401, detail="invalid Slack signature")
-
-        payload_raw = await request.json()
-        if not isinstance(payload_raw, dict):
-            raise HTTPException(status_code=400, detail="invalid request payload")
-
-        if payload_raw.get("type") == "url_verification":
-            challenge = str(payload_raw.get("challenge", ""))
-            return Response(content=challenge, media_type="text/plain")
-
-        if payload_raw.get("type") != "event_callback":
-            return {"ok": True}
-
-        event = payload_raw.get("event")
-        if not isinstance(event, dict):
-            return {"ok": True}
-
-        service = request.state.service
-        if not isinstance(service, SlackBotService):
-            raise HTTPException(status_code=500, detail="service not initialized")
-
-        _spawn(_run_event(service, event))
-        return {"ok": True}
-
-    @app.post("/slack/commands", response_model=None)
-    async def slack_commands(request: Request) -> dict[str, str]:
-        signing_secret_from_state = str(request.state.signing_secret)
-        payload_bytes = await request.body()
-
-        if not _is_valid_signature(request, payload_bytes, signing_secret_from_state):
-            raise HTTPException(status_code=401, detail="invalid Slack signature")
-
-        payload = parse_qs(payload_bytes.decode("utf-8"), keep_blank_values=True)
-        command = payload.get("command", [""])[0].strip()
-        text = payload.get("text", [""])[0].strip().lower()
-        channel_id = payload.get("channel_id", [""])[0].strip()
-
-        if command != "/concerto":
-            return {
-                "response_type": "ephemeral",
-                "text": "Unsupported command. Use /concerto rebuild",
-            }
-
-        if text not in {"rebuild", "rescan"}:
-            return {
-                "response_type": "ephemeral",
-                "text": "Usage: /concerto rebuild",
-            }
-
-        if not _is_supported_channel(channel_id):
-            return {
-                "response_type": "ephemeral",
-                "text": "This command only works in public/private channels.",
-            }
-
-        service = request.state.service
-        if not isinstance(service, SlackBotService):
-            raise HTTPException(status_code=500, detail="service not initialized")
-
-        _spawn(_run_rebuild_command(service, channel_id))
-        return {
-            "response_type": "ephemeral",
-            "text": "Rescanning channel history for links.",
-        }
 
     return app
 
@@ -690,31 +726,6 @@ def _required_env(name: str) -> str:
         msg = f"Missing required environment variable: {name}"
         raise RuntimeError(msg)
     return value
-
-
-def _is_valid_signature(request: Request, body: bytes, signing_secret: str) -> bool:
-    timestamp = request.headers.get("x-slack-request-timestamp")
-    signature = request.headers.get("x-slack-signature")
-    if not timestamp or not signature:
-        return False
-
-    try:
-        request_ts = int(timestamp)
-    except ValueError:
-        return False
-
-    if abs(time.time() - request_ts) > 60 * 5:
-        return False
-
-    basestring = f"v0:{timestamp}:{body.decode('utf-8')}"
-    computed = hmac.new(
-        signing_secret.encode("utf-8"),
-        basestring.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-
-    expected = f"v0={computed}"
-    return hmac.compare_digest(expected, signature)
 
 
 def _extract_links(text: str) -> list[str]:

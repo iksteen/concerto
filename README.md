@@ -13,9 +13,13 @@ Basic Slack bot that tracks concert links in any public or private channel where
 - Run `/concerto rebuild` in a channel to fully rescan that channel's history
 - Tracked data is stored in SQLite only; the bot does not post or pin any messages
 
+The bot connects to Slack over **Socket Mode** (an outbound WebSocket), so no
+public callback URL is required. An HTTP server still runs alongside it (serving
+a placeholder index and `/healthz`).
+
 ## Required environment variables
-- `SLACK_BOT_TOKEN`
-- `SLACK_SIGNING_SECRET`
+- `SLACK_BOT_TOKEN` (`xoxb-...`) — Web API calls
+- `SLACK_APP_TOKEN` (`xapp-...`) — Socket Mode connection (scope `connections:write`)
 
 Optional:
 - `HOST` (default `127.0.0.1`)
@@ -27,7 +31,7 @@ Optional:
 - Example:
 ```env
 SLACK_BOT_TOKEN=xoxb-...
-SLACK_SIGNING_SECRET=...
+SLACK_APP_TOKEN=xapp-...
 CONCERTO_DB_PATH=./concerto.db
 HOST=127.0.0.1
 PORT=8000
@@ -43,17 +47,15 @@ uv run python -m concerto
 ```
 
 ## Slack app setup
-- Enable **Event Subscriptions** and set Request URL to `/slack/events`
-- Add a **Slash Command**:
-  - Command: `/concerto`
-  - Request URL: `/slack/commands`
-  - Usage hint: `rebuild`
-- Subscribe to bot events:
+- Enable **Socket Mode**
+- Create an **app-level token** with the `connections:write` scope (this is `SLACK_APP_TOKEN`)
+- Enable **Event Subscriptions** (no Request URL needed in Socket Mode) and subscribe to bot events:
   - `message.channels`
   - `message.groups`
   - `member_joined_channel`
   - `reaction_added`
   - `reaction_removed`
+- Add a **Slash Command** `/concerto` (no Request URL needed in Socket Mode), usage hint `rebuild`
 - Add OAuth scopes:
   - `channels:history`
   - `groups:history`

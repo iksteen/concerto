@@ -20,7 +20,7 @@
 uv run python -m concerto   # FastAPI + uvicorn, defaults to 127.0.0.1:8000
 ```
 
-`.env` is loaded automatically. Required: `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`. Optional: `HOST`, `PORT`, `CONCERTO_DB_PATH` (default `./concerto.db`). See `README.md` for the full behavior spec and required Slack app scopes/event subscriptions.
+`.env` is loaded automatically. Required: `SLACK_BOT_TOKEN` (`xoxb-`, Web API) and `SLACK_APP_TOKEN` (`xapp-`, Socket Mode). Optional: `HOST`, `PORT`, `CONCERTO_DB_PATH` (default `./concerto.db`). See `README.md` for the full behavior spec and required Slack app scopes/event subscriptions.
 
 ## What this is
 
@@ -36,9 +36,9 @@ The Slack bot lives in `src/concerto/slack_bot.py`; the other files are thin ent
 
 Three layers inside `slack_bot.py`:
 
-1. **FastAPI routes** (`create_app`): `/slack/events`, `/slack/commands`, `/healthz`. Every Slack request is HMAC-verified against `SLACK_SIGNING_SECRET` (`_is_valid_signature`, 5-minute timestamp window) before processing. Slack needs a fast reply, so event/command work is dispatched to a background task via `_spawn` (which keeps a reference so the task is not GC'd) and the route returns `{"ok": True}` immediately.
+1. **HTTP app** (`create_app`): a small FastAPI app serving `/` (placeholder "Hello world") and `/healthz`. Slack itself is **not** handled over HTTP — the lifespan opens the SQLite db + `aiohttp` session, builds the service, and runs `service.run_socket_mode()` as a background task (cancelled on shutdown).
 
-2. **`SlackBotService`**: in-memory state + Slack API orchestration. Caches a `ChannelBoard` per channel in `self._boards` and serializes all mutations behind one `asyncio.Lock` — methods suffixed `_locked` assume the lock is held. Slack calls go through `_api_call` (raises `SlackApiError` on `ok: false`); only read calls (`auth.test`, `conversations.history`) are used.
+2. **`SlackBotService`**: Socket Mode client + in-memory state + Slack API orchestration. `run_socket_mode` calls `apps.connections.open` (with the app-level token) for a `wss://` URL, connects on a dedicated session (no total timeout, heartbeat pings), and reconnects on drop/`disconnect`. `_dispatch_socket_message` acks each envelope by `envelope_id` and dispatches `events_api`/`slash_commands`; heavy work runs in a background task via `_spawn` (which keeps a reference so the task is not GC'd). Caches a `ChannelBoard` per channel in `self._boards` and serializes all mutations behind one `asyncio.Lock` — methods suffixed `_locked` assume the lock is held. Slack calls go through `_api_call` (raises `SlackApiError` on `ok: false`, optional `token=` override for the app token); only read calls (`auth.test`, `conversations.history`, `apps.connections.open`) are used.
 
 3. **`BoardRepository`**: SQLite persistence via `aiosqlite` (WAL mode), spread across three tables (`links`, `link_posters`, `link_statuses`). `save_board` is a full delete-and-reinsert of a channel's rows in one transaction.
 
