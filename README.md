@@ -5,6 +5,7 @@ Basic Slack bot that tracks concert links in any public or private channel where
 ## Behavior
 - Monitors any channel the bot is in (public and private)
 - Extracts links from channel messages and adds them to a tracked list
+- Scrapes each tracked link for concert metadata (band, date, venue) and stores it alongside the link
 - On `member_joined_channel`, scans channel history for existing links and `:+1:` / `:question:` / `:pray:` reactions
 - `:+1:` (or `:thumbsup:`): user has a ticket
 - `:question:` (or `:grey_question:`): user is interested, no ticket yet
@@ -33,7 +34,7 @@ PORT=8000
 ```
 
 ## Persistence
-- State is persisted in SQLite (links, ticket holders, and interested users).
+- State is persisted in SQLite (links with scraped band/date/venue, ticket holders, and interested users).
 - Default database path is `./concerto.db` and can be overridden via `CONCERTO_DB_PATH`.
 
 ## Run

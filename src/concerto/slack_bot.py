@@ -17,6 +17,8 @@ import aiohttp
 import aiosqlite
 from fastapi import FastAPI, HTTPException, Request, Response
 
+from concerto import concert_scraper
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Coroutine
 
@@ -45,6 +47,13 @@ class LinkEntry:
     interested: set[str] = field(default_factory=set)
     ticketswap_wanted: set[str] = field(default_factory=set)
     source_message_ts: str | None = None
+    band: str | None = None
+    event_date: str | None = None
+    venue: str | None = None
+
+    @property
+    def has_metadata(self) -> bool:
+        return bool(self.band or self.event_date or self.venue)
 
 
 @dataclass
@@ -69,6 +78,9 @@ class BoardRepository:
                 channel_id TEXT NOT NULL,
                 url TEXT NOT NULL,
                 source_message_ts TEXT,
+                band TEXT,
+                event_date TEXT,
+                venue TEXT,
                 PRIMARY KEY (channel_id, url)
             );
 
@@ -89,26 +101,30 @@ class BoardRepository:
             );
             """
         )
-        await self._ensure_links_source_message_ts_column()
+        await self._ensure_links_columns()
         await self._db.commit()
 
-    async def _ensure_links_source_message_ts_column(self) -> None:
+    async def _ensure_links_columns(self) -> None:
         async with self._db.execute("PRAGMA table_info(links)") as cursor:
-            columns = {str(row[1]) async for row in cursor if len(row) > 1}
-        if "source_message_ts" in columns:
-            return
-        await self._db.execute("ALTER TABLE links ADD COLUMN source_message_ts TEXT")
+            existing = {str(row[1]) async for row in cursor if len(row) > 1}
+        for column in ("source_message_ts", "band", "event_date", "venue"):
+            if column not in existing:
+                await self._db.execute(f"ALTER TABLE links ADD COLUMN {column} TEXT")
 
     async def load_board(self, channel_id: str) -> ChannelBoard:
         board = ChannelBoard()
 
         async with self._db.execute(
-            "SELECT url, source_message_ts FROM links WHERE channel_id = ?",
+            "SELECT url, source_message_ts, band, event_date, venue "
+            "FROM links WHERE channel_id = ?",
             (channel_id,),
         ) as cursor:
             async for row in cursor:
                 board.links[str(row[0])] = LinkEntry(
-                    source_message_ts=_normalize_ts(row[1])
+                    source_message_ts=_normalize_ts(row[1]),
+                    band=_opt_str(row[2]),
+                    event_date=_opt_str(row[3]),
+                    venue=_opt_str(row[4]),
                 )
 
         await self._load_memberships(channel_id, board.links, "link_posters", "posters")
@@ -164,8 +180,17 @@ class BoardRepository:
 
         for url, entry in board.links.items():
             await self._db.execute(
-                "INSERT INTO links(channel_id, url, source_message_ts) VALUES(?, ?, ?)",
-                (channel_id, url, _normalize_ts(entry.source_message_ts)),
+                "INSERT INTO links"
+                "(channel_id, url, source_message_ts, band, event_date, venue) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
+                (
+                    channel_id,
+                    url,
+                    _normalize_ts(entry.source_message_ts),
+                    entry.band,
+                    entry.event_date,
+                    entry.venue,
+                ),
             )
             await self._insert_memberships(
                 channel_id, url, "link_posters", entry.posters
@@ -229,6 +254,7 @@ class SlackBotService:
         self._repository = repository
         self._boards: dict[str, ChannelBoard] = {}
         self._bot_user_id: str | None = None
+        self._metadata_tried: set[str] = set()
         self._lock = asyncio.Lock()
 
     async def initialize(self) -> None:
@@ -281,10 +307,10 @@ class SlackBotService:
                 if _merge_link_entry(entry, scanned_entry):
                     changed = True
 
-            if not changed:
-                return
+            if changed:
+                await self._persist_locked(channel_id, board)
 
-            await self._persist_locked(channel_id, board)
+        await self._enrich_links(channel_id, list(history_entries))
 
     async def _handle_message_event(self, event: dict[str, Any]) -> None:
         if event.get("subtype"):
@@ -309,12 +335,16 @@ class SlackBotService:
                 _set_earliest_source_message_ts(entry, message_ts)
             await self._persist_locked(channel_id, board)
 
+        await self._enrich_links(channel_id, links)
+
     async def _rebuild_board_from_history(self, channel_id: str) -> None:
         history_entries = await self._collect_history_link_entries(channel_id)
         async with self._lock:
             board = await self._get_board_locked(channel_id)
             board.links = history_entries
             await self._persist_locked(channel_id, board)
+
+        await self._enrich_links(channel_id, list(history_entries))
 
     async def handle_rebuild_command(self, channel_id: str) -> None:
         if not _is_supported_channel(channel_id):
@@ -365,6 +395,47 @@ class SlackBotService:
                 _set_earliest_source_message_ts(entry, message_ts)
                 _apply_status_reaction(entry, reaction, user_id, added=added)
             await self._persist_locked(channel_id, board)
+
+        await self._enrich_links(channel_id, links)
+
+    async def _scrape_metadata(self, url: str) -> concert_scraper.ConcertInfo | None:
+        try:
+            return await concert_scraper.scrape(url, self._session)
+        except (concert_scraper.ScrapeError, aiohttp.ClientError, TimeoutError):
+            logger.warning("Failed to scrape metadata for %s", url, exc_info=True)
+            return None
+
+    async def _enrich_links(self, channel_id: str, urls: list[str]) -> None:
+        async with self._lock:
+            board = await self._get_board_locked(channel_id)
+            pending = [
+                url
+                for url in dict.fromkeys(urls)
+                if url not in self._metadata_tried
+                and not (url in board.links and board.links[url].has_metadata)
+            ]
+            self._metadata_tried.update(pending)
+
+        if not pending:
+            return
+
+        scraped = {
+            url: info
+            for url in pending
+            if (info := await self._scrape_metadata(url)) is not None
+        }
+        if not scraped:
+            return
+
+        async with self._lock:
+            board = await self._get_board_locked(channel_id)
+            changed = False
+            for url, info in scraped.items():
+                entry = board.links.get(url)
+                if entry is not None and _apply_metadata(entry, info):
+                    changed = True
+            if changed:
+                await self._persist_locked(channel_id, board)
 
     async def _get_board_locked(self, channel_id: str) -> ChannelBoard:
         board = self._boards.get(channel_id)
@@ -720,6 +791,24 @@ def _merge_link_entry(target: LinkEntry, source: LinkEntry) -> bool:
 
 def _is_supported_channel(channel_id: str) -> bool:
     return channel_id.startswith(("C", "G"))
+
+
+def _apply_metadata(entry: LinkEntry, info: concert_scraper.ConcertInfo) -> bool:
+    before = (entry.band, entry.event_date, entry.venue)
+    if info.band:
+        entry.band = info.band
+    if info.date:
+        entry.event_date = info.date.isoformat()
+    if info.venue:
+        entry.venue = info.venue
+    return (entry.band, entry.event_date, entry.venue) != before
+
+
+def _opt_str(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _normalize_ts(value: object) -> str | None:
