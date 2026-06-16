@@ -19,3 +19,6 @@ wheels/
 concerto.db
 concerto.db-shm
 concerto.db-wal
+
+# Scratch files
+*.tmp
