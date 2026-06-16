@@ -89,6 +89,9 @@ class EventView:
     expired: bool
     message_url: str | None
     date: dt.date | None
+    going: int  # have a ticket
+    undecided: int  # interested, no ticket yet
+    looking: int  # looking for a ticket on TicketSwap
 
 
 class SlackApiError(RuntimeError):
@@ -315,6 +318,9 @@ class SlackBotService:
                         self._workspace_url, channel_id, entry.source_message_ts
                     ),
                     date=_parse_iso_date(entry.event_date),
+                    going=len(entry.ticket_holders),
+                    undecided=len(entry.interested),
+                    looking=len(entry.ticketswap_wanted),
                 )
                 for url, entry in board.links.items()
             ]
@@ -988,6 +994,11 @@ main { max-width: 760px; margin: 0 auto; padding: 24px 16px 72px; }
 .meta { flex: 1 1 auto; min-width: 0; }
 .band { font-size: 1.14rem; font-weight: 650; word-break: break-word; }
 .venue { color: var(--muted); font-size: 0.92rem; margin: 2px 0 9px; }
+.status { display: flex; gap: 12px; margin: 0 0 9px; }
+.stat {
+  font-size: 0.92rem; font-variant-numeric: tabular-nums;
+  cursor: default; user-select: none;
+}
 .links { display: flex; gap: 8px; flex-wrap: wrap; }
 .link {
   font-size: 0.8rem; text-decoration: none; color: var(--text);
@@ -1015,6 +1026,21 @@ def _render_date_badge(date: dt.date | None) -> str:
     )
 
 
+def _render_status(view: EventView) -> str:
+    # (emoji, count, hover label); zero-count statuses are omitted.
+    stats = [
+        ("\N{TICKET}", view.going, "have a ticket"),
+        ("\N{EYES}", view.undecided, "interested"),
+        ("\N{PERSON WITH FOLDED HANDS}", view.looking, "looking for a ticket"),
+    ]
+    pills = [
+        f'<span class="stat" title="{label}">{emoji} {count}</span>'
+        for emoji, count, label in stats
+        if count
+    ]
+    return f'<div class="status">{"".join(pills)}</div>' if pills else ""
+
+
 def _render_event_card(view: EventView) -> str:
     name = escape(view.band) if view.band else _fallback_name(view.url)
     venue = escape(view.venue) if view.venue else "&mdash;"
@@ -1033,6 +1059,7 @@ def _render_event_card(view: EventView) -> str:
         '<div class="meta">'
         f'<div class="band">{name}</div>'
         f'<div class="venue">{venue}</div>'
+        f"{_render_status(view)}"
         f'<div class="links">{" ".join(links)}</div>'
         "</div>"
         "</article>"
