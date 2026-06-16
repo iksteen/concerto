@@ -1005,7 +1005,7 @@ def _fallback_name(url: str) -> str:
 
 def _render_date_badge(date: dt.date | None) -> str:
     if date is None:
-        return '<div class="date tba"><span class="dom">TBA</span></div>'
+        return '<div class="date tba"><span class="dom">?</span></div>'
     return (
         '<div class="date">'
         f'<span class="dow">{date:%a}</span>'
@@ -1061,7 +1061,7 @@ def _render_overview(channel_id: str, views: list[EventView]) -> str:
 
     sections = ""
     if undated:
-        sections += _render_section("Date to be announced", undated)
+        sections += _render_section("Date unknown", undated)
     if dated:
         sections += _render_section("Upcoming", dated)
     body = sections or '<div class="empty">No upcoming events tracked yet.</div>'
