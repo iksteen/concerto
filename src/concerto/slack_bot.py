@@ -461,8 +461,10 @@ class SlackBotService:
     async def _scrape_metadata(self, url: str) -> concert_scraper.ConcertInfo | None:
         try:
             info = await concert_scraper.scrape(url, self._session)
-        except (concert_scraper.ScrapeError, aiohttp.ClientError, TimeoutError):
-            logger.warning("Failed to scrape metadata for %s", url, exc_info=True)
+        except (concert_scraper.ScrapeError, aiohttp.ClientError, TimeoutError) as exc:
+            # HTTP errors (e.g. Ticketmaster /event/ 401s) and network blips are
+            # expected and unactionable; log concisely without a traceback.
+            logger.warning("Could not scrape %s: %s", url, exc)
             return None
         logger.debug(
             "Scraped %s -> band=%r date=%s venue=%r expired=%s",
