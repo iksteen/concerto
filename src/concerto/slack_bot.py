@@ -38,6 +38,8 @@ SLACK_API_BASE = "https://slack.com/api"
 WEB_API_TIMEOUT_SECONDS = 20
 SOCKET_HEARTBEAT_SECONDS = 30
 SOCKET_RECONNECT_DELAY_SECONDS = 1
+DAYS_PER_WEEK = 7
+DAYS_PER_MONTH = 31
 PLUS_ONE_REACTIONS = {"+1", "thumbsup", "ticket"}
 QUESTION_REACTIONS = {"question", "grey_question", "eyes"}
 PRAY_REACTIONS = {"pray"}
@@ -1090,11 +1092,29 @@ def _render_overview(channel_id: str, views: list[EventView]) -> str:
         key=lambda view: view.date or dt.date.min,
     )
 
-    sections = ""
-    if undated:
-        sections += _render_section("Date unknown", undated)
-    if dated:
-        sections += _render_section("Upcoming", dated)
+    week: list[EventView] = []
+    month: list[EventView] = []
+    later: list[EventView] = []
+    for view in dated:
+        if view.date is None:
+            continue
+        days = (view.date - today).days
+        if days <= DAYS_PER_WEEK:
+            week.append(view)
+        elif days < DAYS_PER_MONTH:
+            month.append(view)
+        else:
+            later.append(view)
+
+    groups = [
+        ("Date unknown", undated),
+        ("This week", week),
+        ("This month", month),
+        ("Upcoming", later),
+    ]
+    sections = "".join(
+        _render_section(title, group) for title, group in groups if group
+    )
     body = sections or '<div class="empty">No upcoming events tracked yet.</div>'
 
     plural = "" if len(upcoming) == 1 else "s"
