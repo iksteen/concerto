@@ -49,6 +49,14 @@ PORT=8000
 uv run python -m concerto
 ```
 
+## Docker
+```bash
+docker compose up -d --build
+```
+- Reads `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` from `.env` (required).
+- The SQLite database is stored in the `concerto-data` named volume (mounted at `/data`), so it persists across restarts and image updates.
+- The HTTP server is published on port `8000`; `HOST`/`PORT`/`CONCERTO_DB_PATH` are set for the container in `docker-compose.yml`.
+
 ## Slack app setup
 - Enable **Socket Mode**
 - Create an **app-level token** with the `connections:write` scope (this is `SLACK_APP_TOKEN`)
