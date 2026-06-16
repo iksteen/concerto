@@ -147,6 +147,18 @@ def parse_date(text: str | None) -> tuple[dt.date | None, str | None]:
     return None, None
 
 
+# <time datetime="2026-06-05">...</time> — a reliable machine-readable date.
+_TIME_TAG = re.compile(r'<time[^>]*\bdatetime=["\']([^"\']+)["\']', re.IGNORECASE)
+
+
+def _date_from_time_tag(html: str) -> tuple[dt.date | None, str | None]:
+    for match in _TIME_TAG.finditer(html):
+        parsed, raw = parse_date(match[1])
+        if parsed:
+            return parsed, raw
+    return None, None
+
+
 # Many WordPress venues encode the date in the URL slug, e.g.
 # "henge-16-jul-2026" or "adrian-vandenberg-13-06-26".
 _SLUG_DAY_MONTH_YEAR = re.compile(r"(\d{1,2})-([a-z]{3,})-(\d{4})$", re.IGNORECASE)
@@ -325,6 +337,8 @@ def _fill_gaps(info: ConcertInfo, html: str, url: str) -> None:
         info.date, info.raw_date = parse_date(_meta_content(html, "og:description"))
     if info.date is None:
         info.date, info.raw_date = date_from_slug(url)
+    if info.date is None:
+        info.date, info.raw_date = _date_from_time_tag(html)
     if info.date is None:
         info.date, info.raw_date = parse_date(_strip_tags(html))
 
