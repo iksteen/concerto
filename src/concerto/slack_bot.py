@@ -39,6 +39,15 @@ PLUS_ONE_REACTIONS = {"+1", "thumbsup"}
 QUESTION_REACTIONS = {"question", "grey_question"}
 PRAY_REACTIONS = {"pray"}
 
+# Links on these domains (and their subdomains) are never tracked.
+IGNORED_LINK_DOMAINS = (
+    "slack.com",
+    "nrc.nl",
+    "youtube.com",
+    "youtu.be",
+    "spotify.com",
+)
+
 
 @dataclass
 class LinkEntry:
@@ -744,12 +753,14 @@ def _extract_links(text: str) -> list[str]:
         match.rstrip('.,!?:;)"]') for match in re.findall(r"https?://[^\s<>|]+", text)
     ]
 
-    return [url for url in dict.fromkeys(links) if not _is_slack_url(url)]
+    return [url for url in dict.fromkeys(links) if not _is_ignored_url(url)]
 
 
-def _is_slack_url(url: str) -> bool:
+def _is_ignored_url(url: str) -> bool:
     host = (urlsplit(url).hostname or "").lower()
-    return host == "slack.com" or host.endswith(".slack.com")
+    return any(
+        host == domain or host.endswith("." + domain) for domain in IGNORED_LINK_DOMAINS
+    )
 
 
 def _update_membership(group: set[str], user_id: str, *, added: bool) -> None:
