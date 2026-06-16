@@ -43,14 +43,14 @@ Three layers inside `slack_bot.py`:
 3. **`BoardRepository`**: SQLite persistence via `aiosqlite` (WAL mode), spread across three tables (`links`, `link_posters`, `link_statuses`). `save_board` is a full delete-and-reinsert of a channel's rows in one transaction.
 
 ### Domain model
-- `LinkEntry`: per-URL membership sets — `posters`, `ticket_holders`, `interested`, `ticketswap_wanted` — plus `source_message_ts` and scraped metadata (`band`, `event_date`, `venue`).
+- `LinkEntry`: per-URL membership sets — `posters`, `ticket_holders`, `interested`, `ticketswap_wanted` — plus `source_message_ts`, scraped metadata (`band`, `event_date`, `venue`), and `expired` (page gone/redirected to a listing → event is in the past).
 - `ChannelBoard`: `dict[url, LinkEntry]`.
 
 ### Status rules (`_apply_status_reaction`)
 Statuses are mutually exclusive and ticket-holder wins: adding `:+1:` clears `interested`/`ticketswap_wanted`; `:question:`/`:pray:` are ignored for users who already hold a ticket. Keep this precedence intact when changing reaction handling.
 
 ### Metadata enrichment (`_enrich_links`)
-After links are persisted, `_enrich_links` runs the concert scraper (`concert_scraper.scrape`, reusing the bot's `aiohttp` session) **outside the lock** — never scrape while holding `self._lock`. It scrapes a URL at most once per process (`self._metadata_tried`) and skips links that already have metadata; results are merged back and persisted under the lock. Scrape failures are logged and ignored — enrichment must never break link tracking.
+After links are persisted, `_enrich_links` runs the concert scraper (`concert_scraper.scrape`, reusing the bot's `aiohttp` session) **outside the lock** — never scrape while holding `self._lock`. It scrapes a URL at most once per process (`self._metadata_tried`) and skips links already resolved (`is_resolved` = has metadata or is expired); results are merged back and persisted under the lock. A scrape returns `expired=True` when the page 404s/410s or redirects to an ancestor path (event removed); scrape failures are logged and ignored — enrichment must never break link tracking.
 
 ### Data flows
 - **Message with links** → add poster, set earliest `source_message_ts`, persist, then enrich.

@@ -6,6 +6,7 @@ Basic Slack bot that tracks concert links in any public or private channel where
 - Monitors any channel the bot is in (public and private)
 - Extracts links from channel messages and adds them to a tracked list
 - Scrapes each tracked link for concert metadata (band, date, venue) and stores it alongside the link
+- Marks a link as expired when its page 404s or redirects to a listing page (the event has been removed and is in the past)
 - On `member_joined_channel`, scans channel history for existing links and `:+1:` / `:question:` / `:pray:` reactions
 - `:+1:` (or `:thumbsup:` / `:ticket:`): user has a ticket
 - `:question:` (or `:grey_question:` / `:eyes:`): user is interested, no ticket yet

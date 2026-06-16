@@ -59,10 +59,16 @@ class LinkEntry:
     band: str | None = None
     event_date: str | None = None
     venue: str | None = None
+    expired: bool = False
 
     @property
     def has_metadata(self) -> bool:
         return bool(self.band or self.event_date or self.venue)
+
+    @property
+    def is_resolved(self) -> bool:
+        # Either we have metadata, or the event is gone — no need to re-scrape.
+        return self.has_metadata or self.expired
 
 
 @dataclass
@@ -90,6 +96,7 @@ class BoardRepository:
                 band TEXT,
                 event_date TEXT,
                 venue TEXT,
+                expired TEXT,
                 PRIMARY KEY (channel_id, url)
             );
 
@@ -116,7 +123,7 @@ class BoardRepository:
     async def _ensure_links_columns(self) -> None:
         async with self._db.execute("PRAGMA table_info(links)") as cursor:
             existing = {str(row[1]) async for row in cursor if len(row) > 1}
-        for column in ("source_message_ts", "band", "event_date", "venue"):
+        for column in ("source_message_ts", "band", "event_date", "venue", "expired"):
             if column not in existing:
                 await self._db.execute(f"ALTER TABLE links ADD COLUMN {column} TEXT")
 
@@ -124,7 +131,7 @@ class BoardRepository:
         board = ChannelBoard()
 
         async with self._db.execute(
-            "SELECT url, source_message_ts, band, event_date, venue "
+            "SELECT url, source_message_ts, band, event_date, venue, expired "
             "FROM links WHERE channel_id = ?",
             (channel_id,),
         ) as cursor:
@@ -134,6 +141,7 @@ class BoardRepository:
                     band=_opt_str(row[2]),
                     event_date=_opt_str(row[3]),
                     venue=_opt_str(row[4]),
+                    expired=bool(_opt_str(row[5])),
                 )
 
         await self._load_memberships(channel_id, board.links, "link_posters", "posters")
@@ -190,8 +198,8 @@ class BoardRepository:
         for url, entry in board.links.items():
             await self._db.execute(
                 "INSERT INTO links"
-                "(channel_id, url, source_message_ts, band, event_date, venue) "
-                "VALUES(?, ?, ?, ?, ?, ?)",
+                "(channel_id, url, source_message_ts, band, event_date, venue, expired) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?)",
                 (
                     channel_id,
                     url,
@@ -199,6 +207,7 @@ class BoardRepository:
                     entry.band,
                     entry.event_date,
                     entry.venue,
+                    "1" if entry.expired else None,
                 ),
             )
             await self._insert_memberships(
@@ -416,11 +425,12 @@ class SlackBotService:
             logger.warning("Failed to scrape metadata for %s", url, exc_info=True)
             return None
         logger.debug(
-            "Scraped %s -> band=%r date=%s venue=%r",
+            "Scraped %s -> band=%r date=%s venue=%r expired=%s",
             url,
             info.band,
             info.date,
             info.venue,
+            info.expired,
         )
         return info
 
@@ -431,7 +441,7 @@ class SlackBotService:
                 url
                 for url in dict.fromkeys(urls)
                 if url not in self._metadata_tried
-                and not (url in board.links and board.links[url].has_metadata)
+                and not (url in board.links and board.links[url].is_resolved)
             ]
             self._metadata_tried.update(pending)
 
@@ -849,14 +859,16 @@ def _is_supported_channel(channel_id: str) -> bool:
 
 
 def _apply_metadata(entry: LinkEntry, info: concert_scraper.ConcertInfo) -> bool:
-    before = (entry.band, entry.event_date, entry.venue)
+    before = (entry.band, entry.event_date, entry.venue, entry.expired)
     if info.band:
         entry.band = info.band
     if info.date:
         entry.event_date = info.date.isoformat()
     if info.venue:
         entry.venue = info.venue
-    return (entry.band, entry.event_date, entry.venue) != before
+    if info.expired:
+        entry.expired = True
+    return (entry.band, entry.event_date, entry.venue, entry.expired) != before
 
 
 def _opt_str(value: object) -> str | None:

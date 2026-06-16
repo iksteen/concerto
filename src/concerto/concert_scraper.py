@@ -87,6 +87,9 @@ class ConcertInfo:
     date: dt.date | None = None
     venue: str | None = None
     raw_date: str | None = None
+    # The page is gone (404/410) or redirected to a listing page, which means
+    # the event has been removed from the site and is in the past.
+    expired: bool = False
 
     @property
     def is_complete(self) -> bool:
@@ -510,20 +513,43 @@ def parse(html: str, url: str) -> ConcertInfo:
 # --------------------------------------------------------------------------- #
 # Fetching
 # --------------------------------------------------------------------------- #
-async def fetch_html(session: aiohttp.ClientSession, url: str) -> str:
+GONE_STATUS = {404, 410}
+HTTP_ERROR_STATUS = 400
+
+
+def _redirected_to_ancestor(requested: str, final: str) -> bool:
+    """Report whether a redirect landed on an ancestor path (e.g. a listing).
+
+    Removed events typically redirect from /agenda/<slug> to /agenda/, while
+    benign redirects (http->https, trailing slash, www) keep the same path.
+    """
+    requested_path = urlsplit(requested).path.rstrip("/")
+    final_path = urlsplit(final).path.rstrip("/")
+    return requested_path != final_path and requested_path.startswith(final_path + "/")
+
+
+async def _fetch(session: aiohttp.ClientSession, url: str) -> str | None:
+    """Return the page HTML, or None if the event is gone (expired)."""
     async with session.get(url, headers={"User-Agent": USER_AGENT}) as response:
-        if response.status >= 400:  # noqa: PLR2004
+        if response.status in GONE_STATUS:
+            return None
+        if response.status >= HTTP_ERROR_STATUS:
             msg = f"GET {url} returned HTTP {response.status}"
             raise ScrapeError(msg)
+        if _redirected_to_ancestor(url, str(response.url)):
+            return None
         return await response.text()
 
 
 async def scrape(url: str, session: aiohttp.ClientSession | None = None) -> ConcertInfo:
-    if session is not None:
-        return parse(await fetch_html(session, url), url)
-    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-    async with aiohttp.ClientSession(timeout=timeout) as owned_session:
-        return parse(await fetch_html(owned_session, url), url)
+    if session is None:
+        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as owned_session:
+            return await scrape(url, owned_session)
+    html = await _fetch(session, url)
+    if html is None:
+        return ConcertInfo(url=url, expired=True)
+    return parse(html, url)
 
 
 async def scrape_many(urls: Iterable[str]) -> list[ConcertInfo | ScrapeError]:
@@ -545,6 +571,8 @@ async def scrape_many(urls: Iterable[str]) -> list[ConcertInfo | ScrapeError]:
 def _format(result: ConcertInfo | ScrapeError) -> str:
     if isinstance(result, ScrapeError):
         return f"ERROR: {result}"
+    if result.expired:
+        return f"EXPIRED  (event removed)\n    {result.url}"
     date_text = result.date.isoformat() if result.date else "?"
     return (
         f"{date_text}  {result.band or '?'}  @ {result.venue or '?'}\n    {result.url}"
