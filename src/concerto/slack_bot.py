@@ -63,6 +63,7 @@ class LinkEntry:
     source_message_ts: str | None = None
     band: str | None = None
     event_date: str | None = None
+    event_end_date: str | None = None
     venue: str | None = None
     expired: bool = False
 
@@ -91,6 +92,7 @@ class EventView:
     expired: bool
     message_url: str | None
     date: dt.date | None
+    end_date: dt.date | None  # end of a multi-day run, else None
     going: int  # have a ticket
     undecided: int  # interested, no ticket yet
     looking: int  # looking for a ticket on TicketSwap
@@ -115,6 +117,7 @@ class BoardRepository:
                 source_message_ts TEXT,
                 band TEXT,
                 event_date TEXT,
+                event_end_date TEXT,
                 venue TEXT,
                 expired TEXT,
                 PRIMARY KEY (channel_id, url)
@@ -143,7 +146,14 @@ class BoardRepository:
     async def _ensure_links_columns(self) -> None:
         async with self._db.execute("PRAGMA table_info(links)") as cursor:
             existing = {str(row[1]) async for row in cursor if len(row) > 1}
-        for column in ("source_message_ts", "band", "event_date", "venue", "expired"):
+        for column in (
+            "source_message_ts",
+            "band",
+            "event_date",
+            "event_end_date",
+            "venue",
+            "expired",
+        ):
             if column not in existing:
                 await self._db.execute(f"ALTER TABLE links ADD COLUMN {column} TEXT")
 
@@ -151,8 +161,8 @@ class BoardRepository:
         board = ChannelBoard()
 
         async with self._db.execute(
-            "SELECT url, source_message_ts, band, event_date, venue, expired "
-            "FROM links WHERE channel_id = ?",
+            "SELECT url, source_message_ts, band, event_date, venue, expired, "
+            "event_end_date FROM links WHERE channel_id = ?",
             (channel_id,),
         ) as cursor:
             async for row in cursor:
@@ -162,6 +172,7 @@ class BoardRepository:
                     event_date=_opt_str(row[3]),
                     venue=_opt_str(row[4]),
                     expired=bool(_opt_str(row[5])),
+                    event_end_date=_opt_str(row[6]),
                 )
 
         await self._load_memberships(channel_id, board.links, "link_posters", "posters")
@@ -218,8 +229,9 @@ class BoardRepository:
         for url, entry in board.links.items():
             await self._db.execute(
                 "INSERT INTO links"
-                "(channel_id, url, source_message_ts, band, event_date, venue, expired) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                "(channel_id, url, source_message_ts, band, event_date, venue, "
+                "expired, event_end_date) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     channel_id,
                     url,
@@ -228,6 +240,7 @@ class BoardRepository:
                     entry.event_date,
                     entry.venue,
                     "1" if entry.expired else None,
+                    entry.event_end_date,
                 ),
             )
             await self._insert_memberships(
@@ -320,6 +333,7 @@ class SlackBotService:
                         self._workspace_url, channel_id, entry.source_message_ts
                     ),
                     date=_parse_iso_date(entry.event_date),
+                    end_date=_parse_iso_date(entry.event_end_date),
                     going=len(entry.ticket_holders),
                     undecided=len(entry.interested),
                     looking=len(entry.ticketswap_wanted),
@@ -915,16 +929,30 @@ def _is_supported_channel(channel_id: str) -> bool:
 
 
 def _apply_metadata(entry: LinkEntry, info: concert_scraper.ConcertInfo) -> bool:
-    before = (entry.band, entry.event_date, entry.venue, entry.expired)
+    before = (
+        entry.band,
+        entry.event_date,
+        entry.event_end_date,
+        entry.venue,
+        entry.expired,
+    )
     if info.band:
         entry.band = info.band
     if info.date:
         entry.event_date = info.date.isoformat()
+    if info.end_date:
+        entry.event_end_date = info.end_date.isoformat()
     if info.venue:
         entry.venue = info.venue
     if info.expired:
         entry.expired = True
-    return (entry.band, entry.event_date, entry.venue, entry.expired) != before
+    return (
+        entry.band,
+        entry.event_date,
+        entry.event_end_date,
+        entry.venue,
+        entry.expired,
+    ) != before
 
 
 def _opt_str(value: object) -> str | None:
@@ -1000,6 +1028,7 @@ main { max-width: 760px; margin: 0 auto; padding: 24px 16px 72px; }
 .meta { flex: 1 1 auto; min-width: 0; }
 .band { font-size: 1.14rem; font-weight: 650; word-break: break-word; }
 .venue { color: var(--muted); font-size: 0.92rem; margin: 2px 0 9px; }
+.run { color: var(--accent); font-size: 0.82rem; margin: -4px 0 9px; }
 .status { display: flex; gap: 12px; margin: 0 0 9px; }
 .stat {
   font-size: 0.92rem; font-variant-numeric: tabular-nums;
@@ -1047,6 +1076,22 @@ def _render_status(view: EventView) -> str:
     return f'<div class="status">{"".join(pills)}</div>' if pills else ""
 
 
+def _is_upcoming(view: EventView, today: dt.date) -> bool:
+    if view.expired:
+        return False
+    # End of the run if it's a multi-day event, else the single date.
+    effective = view.end_date or view.date
+    return effective is None or effective >= today
+
+
+def _render_run(view: EventView) -> str:
+    # Show the closing date for a multi-day run; the badge shows the opening.
+    end = view.end_date
+    if end is None or (view.date is not None and end <= view.date):
+        return ""
+    return f'<div class="run">through {end:%-d %b %Y}</div>'
+
+
 def _render_event_card(view: EventView) -> str:
     name = escape(view.band) if view.band else _fallback_name(view.url)
     venue = escape(view.venue) if view.venue else "&mdash;"
@@ -1065,6 +1110,7 @@ def _render_event_card(view: EventView) -> str:
         '<div class="meta">'
         f'<div class="band">{name}</div>'
         f'<div class="venue">{venue}</div>'
+        f"{_render_run(view)}"
         f"{_render_status(view)}"
         f'<div class="links">{" ".join(links)}</div>'
         "</div>"
@@ -1081,11 +1127,9 @@ def _render_section(title: str, views: list[EventView]) -> str:
 
 def _render_overview(channel_id: str, views: list[EventView]) -> str:
     today = dt.datetime.now(tz=dt.UTC).date()
-    upcoming = [
-        view
-        for view in views
-        if not view.expired and (view.date is None or view.date >= today)
-    ]
+    # A multi-day run stays relevant until its end date, not its opening date,
+    # so it isn't hidden while performances are still happening.
+    upcoming = [view for view in views if _is_upcoming(view, today)]
     undated = [view for view in upcoming if view.date is None]
     dated = sorted(
         (view for view in upcoming if view.date is not None),

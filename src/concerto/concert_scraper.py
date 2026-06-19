@@ -88,6 +88,9 @@ class ConcertInfo:
     url: str
     band: str | None = None
     date: dt.date | None = None
+    # End of a multi-day run (e.g. an opera or theatre production that plays
+    # over several weeks); None for single-date events.
+    end_date: dt.date | None = None
     venue: str | None = None
     raw_date: str | None = None
     # The page is gone (404/410) or redirected to a listing page, which means
@@ -300,6 +303,11 @@ def _event_to_info(obj: dict[str, object], url: str) -> ConcertInfo:
     start = obj.get("startDate") or obj.get("date")
     if isinstance(start, str):
         info.date, info.raw_date = parse_date(start)
+    end = obj.get("endDate")
+    if isinstance(end, str):
+        end_date, _ = parse_date(end)
+        if end_date and (info.date is None or end_date > info.date):
+            info.end_date = end_date
     location = obj.get("location")
     if isinstance(location, list) and location:
         location = location[0]
