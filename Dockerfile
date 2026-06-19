@@ -17,12 +17,16 @@ WORKDIR /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-install-project --no-dev
+    uv sync --locked --no-install-project --no-dev --no-editable
 
-# Install the project itself.
+# Install the project itself. --no-editable copies the package into
+# site-packages instead of installing an editable .pth that points at
+# /app/src; the editable layout depends on the source tree and on the
+# .pth surviving across build layers, which is fragile under different
+# BuildKit cache behaviour (e.g. "No module named concerto" on some hosts).
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
+    uv sync --locked --no-dev --no-editable
 
 # Run as a non-root user; the SQLite database lives in a persisted volume.
 RUN useradd --uid 1000 --create-home app \
