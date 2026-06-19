@@ -67,8 +67,12 @@ docker compose up -d --build
   - `reaction_added`
   - `reaction_removed`
 - Add a **Slash Command** `/concerto` (no Request URL needed in Socket Mode), usage hint `rebuild`
-- Add OAuth scopes:
-  - `channels:history`
-  - `groups:history`
-  - `reactions:read`
+- You don't need to add OAuth scopes by hand: subscribing to the events above
+  and adding the slash command makes Slack add every bot token scope they
+  require. For reference, the resulting set is:
+  - `channels:history`, `groups:history` — from `message.channels` / `message.groups`
+  - `channels:read`, `groups:read` — from `member_joined_channel`, used to scan a
+    channel's existing links and reaction emoji when the bot is invited
+  - `reactions:read` — from `reaction_added` / `reaction_removed`
+  - `commands` — from the `/concerto` slash command
 - Install the app to your workspace and invite it to channels you want to track
