@@ -1,0 +1,56 @@
+# Slack app manifest for concerto.
+#
+# Create a new app from this at https://api.slack.com/apps -> "Create New App"
+# -> "From a manifest". Useful for spinning up an isolated test app (its own
+# tokens, invited to a throwaway channel) so local changes don't fight the
+# production app over the same Socket Mode event stream.
+#
+# Unlike the web UI, a manifest does NOT auto-add the OAuth scopes implied by
+# event subscriptions / the slash command, so every required bot scope is
+# listed explicitly under oauth_config.scopes.bot below.
+#
+# After importing you still need to, by hand:
+#   1. Generate an app-level token with the connections:write scope
+#      (Basic Information -> App-Level Tokens). This is SLACK_APP_TOKEN (xapp-).
+#   2. Install the app to the workspace to get the bot token. This is
+#      SLACK_BOT_TOKEN (xoxb-).
+#   3. Invite the bot to the channels you want to track.
+
+display_information:
+  name: Concerto
+  description: Tracks concert links and per-user ticket status in channels.
+  background_color: "#161a23"
+
+features:
+  bot_user:
+    display_name: concerto
+    always_online: true
+  slash_commands:
+    # For a separate dev app, change this to e.g. /concerto-dev and set the
+    # matching CONCERTO_SLASH_COMMAND env var so the running bot listens for it.
+    - command: /concerto
+      description: Manage the concert board for this channel
+      usage_hint: rebuild
+      should_escape: false
+
+oauth_config:
+  scopes:
+    bot:
+      - channels:history      # read public channel messages (message.channels, conversations.history)
+      - groups:history        # read private channel messages (message.groups, conversations.history)
+      - channels:read         # receive member_joined_channel for public channels
+      - groups:read           # receive member_joined_channel for private channels
+      - reactions:read        # reaction_added / reaction_removed + reactions in history
+      - commands              # the /concerto slash command
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups
+      - member_joined_channel
+      - reaction_added
+      - reaction_removed
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

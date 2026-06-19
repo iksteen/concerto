@@ -27,6 +27,9 @@ Optional:
 - `HOST` (default `127.0.0.1`)
 - `PORT` (default `8000`)
 - `CONCERTO_DB_PATH` (default `./concerto.db`)
+- `CONCERTO_SLASH_COMMAND` (default `/concerto`) — must match the slash command
+  registered in the Slack app; set e.g. `/concerto-dev` for a separate dev app
+  (a leading `/` is added if omitted)
 - `LOG_LEVEL` (default `INFO`; set `DEBUG` to log incoming events and scrape results)
 
 ## Environment file

@@ -300,11 +300,13 @@ class SlackBotService:
         app_token: str,
         session: aiohttp.ClientSession,
         repository: BoardRepository,
+        command: str = "/concerto",
     ) -> None:
         self._bot_token = bot_token
         self._app_token = app_token
         self._session = session
         self._repository = repository
+        self._command = command
         self._boards: dict[str, ChannelBoard] = {}
         self._bot_user_id: str | None = None
         self._workspace_url: str | None = None
@@ -739,13 +741,16 @@ class SlackBotService:
         text = str(payload.get("text", "")).strip().lower()
         channel_id = str(payload.get("channel_id", "")).strip()
 
-        if command != "/concerto":
+        if command != self._command:
             return {
                 "response_type": "ephemeral",
-                "text": "Unsupported command. Use /concerto rebuild",
+                "text": f"Unsupported command. Use {self._command} rebuild",
             }
         if text not in {"rebuild", "rescan"}:
-            return {"response_type": "ephemeral", "text": "Usage: /concerto rebuild"}
+            return {
+                "response_type": "ephemeral",
+                "text": f"Usage: {self._command} rebuild",
+            }
         if not _is_supported_channel(channel_id):
             return {
                 "response_type": "ephemeral",
@@ -763,6 +768,7 @@ def create_app() -> FastAPI:
     bot_token = _required_env("SLACK_BOT_TOKEN")
     app_token = _required_env("SLACK_APP_TOKEN")
     database_path = os.getenv("CONCERTO_DB_PATH", "./concerto.db")
+    command = _slash_command()
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[dict[str, Any]]:
@@ -780,6 +786,7 @@ def create_app() -> FastAPI:
                 app_token=app_token,
                 session=session,
                 repository=repository,
+                command=command,
             )
             await service.initialize()
             # Slack is handled over Socket Mode, running alongside the HTTP app.
@@ -840,6 +847,13 @@ def _required_env(name: str) -> str:
         msg = f"Missing required environment variable: {name}"
         raise RuntimeError(msg)
     return value
+
+
+def _slash_command() -> str:
+    # Slack delivers the command with a leading slash (e.g. "/concerto-dev"),
+    # so normalize the configured value to match regardless of how it's written.
+    command = os.getenv("CONCERTO_SLASH_COMMAND", "/concerto").strip()
+    return command if command.startswith("/") else f"/{command}"
 
 
 def _extract_links(text: str) -> list[str]:
