@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+# Trixie ships OpenSSL 3.5; the older bookworm (OpenSSL 3.0) produces a TLS
+# ClientHello fingerprint that Cloudflare's bot management blocks with 403
+# (e.g. www.tivolivredenburg.nl), even though the host's OpenSSL 3.5 passes.
+FROM ghcr.io/astral-sh/uv:python3.12-trixie-slim
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
