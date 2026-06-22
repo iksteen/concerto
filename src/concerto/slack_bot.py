@@ -52,6 +52,7 @@ IGNORED_LINK_DOMAINS = (
     "youtube.com",
     "youtu.be",
     "spotify.com",
+    "infrapuin.nl",
 )
 
 
