@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 import aiohttp
 import aiosqlite
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from concerto import concert_scraper
 
@@ -38,6 +38,7 @@ SLACK_API_BASE = "https://slack.com/api"
 WEB_API_TIMEOUT_SECONDS = 20
 SOCKET_HEARTBEAT_SECONDS = 30
 SOCKET_RECONNECT_DELAY_SECONDS = 1
+SSE_KEEPALIVE_SECONDS = 15
 DAYS_PER_WEEK = 7
 DAYS_PER_MONTH = 31
 PLUS_ONE_REACTIONS = {"+1", "thumbsup", "ticket"}
@@ -312,6 +313,7 @@ class SlackBotService:
         self._workspace_url: str | None = None
         self._metadata_tried: set[str] = set()
         self._lock = asyncio.Lock()
+        self._subscribers: dict[str, set[asyncio.Queue[None]]] = {}
 
     async def initialize(self) -> None:
         auth_info = await self._api_call("auth.test", {})
@@ -540,6 +542,26 @@ class SlackBotService:
 
     async def _persist_locked(self, channel_id: str, board: ChannelBoard) -> None:
         await self._repository.save_board(channel_id, board)
+        self._notify(channel_id)
+
+    def subscribe(self, channel_id: str) -> asyncio.Queue[None]:
+        # maxsize=1 coalesces a burst of updates into a single pending reload.
+        queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
+        self._subscribers.setdefault(channel_id, set()).add(queue)
+        return queue
+
+    def unsubscribe(self, channel_id: str, queue: asyncio.Queue[None]) -> None:
+        subscribers = self._subscribers.get(channel_id)
+        if subscribers is None:
+            return
+        subscribers.discard(queue)
+        if not subscribers:
+            del self._subscribers[channel_id]
+
+    def _notify(self, channel_id: str) -> None:
+        for queue in self._subscribers.get(channel_id, ()):
+            if queue.empty():
+                queue.put_nowait(None)
 
     async def _get_message_text(self, channel: str, message_ts: str) -> str:
         history_response = await self._api_call(
@@ -817,6 +839,31 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="unknown channel")
         views = await service.event_views(channel_id)
         return _render_overview(channel_id, views)
+
+    @app.get("/board/{channel_id}/events")
+    async def board_events(channel_id: str, request: Request) -> StreamingResponse:
+        service = request.state.service
+        if not isinstance(service, SlackBotService):
+            raise HTTPException(status_code=500, detail="service not initialized")
+        if not _is_supported_channel(channel_id):
+            raise HTTPException(status_code=404, detail="unknown channel")
+
+        queue = service.subscribe(channel_id)
+
+        async def stream() -> AsyncIterator[str]:
+            try:
+                while True:
+                    try:
+                        await asyncio.wait_for(
+                            queue.get(), timeout=SSE_KEEPALIVE_SECONDS
+                        )
+                        yield "data: update\n\n"
+                    except TimeoutError:
+                        yield ": keepalive\n\n"
+            finally:
+                service.unsubscribe(channel_id, queue)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
 
     return app
 
@@ -1185,7 +1232,11 @@ def _render_overview(channel_id: str, views: list[EventView]) -> str:
         '<header class="top"><h1>Upcoming concerts</h1>'
         f'<p class="sub">{len(upcoming)} event{plural} &middot; '
         f"{escape(channel_id)}</p></header>"
-        f"<main>{body}</main></body></html>"
+        f"<main>{body}</main>"
+        # Live-reload when the board changes; EventSource auto-reconnects on drop.
+        "<script>new EventSource(location.pathname+'/events')"
+        ".onmessage=()=>location.reload()</script>"
+        "</body></html>"
     )
 
 
