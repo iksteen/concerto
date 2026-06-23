@@ -30,17 +30,17 @@ A Slack bot that tracks concert links posted in channels, storing each link with
 
 ## Architecture
 
-The Slack bot lives in `src/concerto/slack_bot.py`; the other files are thin entry points:
+The code splits into a **platform-agnostic core** (`src/concerto/board.py`) and a **Slack platform layer** (`src/concerto/slack_bot.py`). The core knows nothing about Slack; a second platform (e.g. Discord) would be another file alongside `slack_bot.py` reusing the same core. Entry points are thin:
 - `__init__.py` is empty — importing the package (or the scraper submodule) has no side effects.
-- `__main__.py` calls `load_dotenv()` + `create_app()` inside `main()` and runs the app under uvicorn (`HOST`/`PORT`), so the Slack env is only needed to run the server.
+- `__main__.py` calls `load_dotenv()` + `create_app()` (from `slack_bot`) inside `main()` and runs the app under uvicorn (`HOST`/`PORT`), so the Slack env is only needed to run the server.
 
-Three layers inside `slack_bot.py`:
+**Core — `board.py`:**
 
-1. **HTTP app** (`create_app`): a small FastAPI app serving `/` (placeholder "Hello world"), `/healthz`, and `GET /board/{channel_id}` — a styled overview of a channel's upcoming events (`service.event_views` → list of `EventView` snapshots → `_render_overview`, which hides expired/past events and groups the rest into Date unknown / This week / This month / Upcoming, ordered by date). Slack itself is **not** handled over HTTP — the lifespan opens the SQLite db + `aiohttp` session, builds the service, exposes it via `request.state.service`, and runs `service.run_socket_mode()` as a background task (cancelled on shutdown).
+1. **`BoardService`**: owns the in-memory state and all platform-neutral logic — the per-channel `ChannelBoard` cache (`self._boards`), the single `asyncio.Lock` serializing mutations (methods suffixed `_locked` assume it's held), metadata enrichment, and SSE subscribers. Platforms drive it through four neutral ingestion methods — `apply_message`, `apply_reactions`, `replace_board`, `merge_entries` — and override two hooks: `is_supported_channel` and `message_url`. `event_views` builds `EventView` snapshots for the web layer.
+2. **`BoardRepository`**: SQLite persistence via `aiosqlite` (WAL mode), a single `links` table. `save_board` is a full delete-and-reinsert of a channel's rows in one transaction.
+3. **Web routes** (`register_board_routes`): `/` (placeholder "Hello world"), `/healthz`, and `GET /board/{channel_id}` — a styled overview (`service.event_views` → `EventView` list → `render_overview`, which hides expired/past events and groups the rest into Date unknown / This week / This month / Upcoming) plus its `/events` SSE stream. Reads the active service from `request.state.service`.
 
-2. **`SlackBotService`**: Socket Mode client + in-memory state + Slack API orchestration. `run_socket_mode` calls `apps.connections.open` (with the app-level token) for a `wss://` URL, connects on a dedicated session (no total timeout, heartbeat pings), and reconnects on drop/`disconnect`. `_dispatch_socket_message` acks each envelope by `envelope_id` and dispatches `events_api`/`slash_commands`; heavy work runs in a background task via `_spawn` (which keeps a reference so the task is not GC'd). Caches a `ChannelBoard` per channel in `self._boards` and serializes all mutations behind one `asyncio.Lock` — methods suffixed `_locked` assume the lock is held. Slack calls go through `_api_call` (raises `SlackApiError` on `ok: false`, optional `token=` override for the app token); only read calls (`auth.test`, `conversations.history`, `apps.connections.open`) are used.
-
-3. **`BoardRepository`**: SQLite persistence via `aiosqlite` (WAL mode), a single `links` table. `save_board` is a full delete-and-reinsert of a channel's rows in one transaction.
+**Slack layer — `slack_bot.py`:** `SlackBotService(BoardService)` adds Socket Mode transport + Slack API orchestration. `run_socket_mode` calls `apps.connections.open` (app-level token) for a `wss://` URL, connects on a dedicated session (no total timeout, heartbeat pings), and reconnects on drop/`disconnect`. `_dispatch_socket_message` acks each envelope by `envelope_id` and dispatches `events_api`/`slash_commands`; heavy work runs in a background task via `_spawn` (keeps a reference so the task isn't GC'd). Slack calls go through `_api_call` (raises `SlackApiError` on `ok: false`, optional `token=` override); only read calls (`auth.test`, `conversations.history`, `apps.connections.open`) are used. `create_app` opens the db + `aiohttp` session in the FastAPI lifespan, builds the service, exposes it via `request.state.service`, registers the core routes, and runs `run_socket_mode()` as a background task (cancelled on shutdown).
 
 > **No data migrations.** Schema migrations are fine (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN`, `DROP TABLE IF EXISTS` in `init`), but never write code that reshapes existing *rows* — we end up dragging it along forever. The board is fully reconstructable from Slack history, so to fix data just run a rebuild (`/concerto rebuild`). New columns get a sane default (e.g. counts default `0`) and are repopulated on the next rebuild.
 
@@ -48,19 +48,19 @@ Three layers inside `slack_bot.py`:
 - `LinkEntry`: per-URL aggregate reaction counts — `going` (has a ticket), `undecided` (interested), `looking` (TicketSwap) — `source_message_ts`, scraped metadata (`band`, `event_date`, `venue`), and `expired` (page gone/redirected to a listing → event is in the past). We store **only counts**, never who posted or reacted (privacy).
 - `ChannelBoard`: `dict[url, LinkEntry]`.
 
-### Status rules (`_aggregate_status_counts`)
-Reactions are re-parsed from the whole message into counts; each user counted once with ticket-holder winning: `:+1:` outranks `:question:`/`:eyes:`, which outranks `:pray:`. Keep this precedence intact when changing reaction handling.
+### Status rules (`aggregate_status_counts`, in `board.py`)
+Reactions are re-parsed from the whole message into counts; each user counted once with ticket-holder winning: `:+1:` outranks `:question:`/`:eyes:`, which outranks `:pray:`. The reaction sets are platform-neutral shortcodes (`PLUS_ONE_REACTIONS` etc.); a platform whose emoji use other names must translate to these. Input is the neutral shape `[{"name": str, "users": [str, ...]}, ...]`. Keep this precedence intact when changing reaction handling.
 
-### Metadata enrichment (`_enrich_links`)
+### Metadata enrichment (`BoardService._enrich_links`)
 After links are persisted, `_enrich_links` runs the concert scraper (`concert_scraper.scrape`, reusing the bot's `aiohttp` session) **outside the lock** — never scrape while holding `self._lock`. It scrapes a URL at most once per process (`self._metadata_tried`) and skips links already resolved (`is_resolved` = has metadata or is expired); results are merged back and persisted under the lock. A scrape returns `expired=True` when the page is gone (404/410/401) or redirects to an ancestor path (event removed); scrape failures are logged and ignored — enrichment must never break link tracking.
 
-### Data flows
-- **Message with links** → set earliest `source_message_ts`, persist, then enrich.
-- **Reaction add/remove** → fetch the reacted message, re-extract links, re-parse *all* its reactions into counts (not the single delta), persist, then enrich.
-- **Bot joins channel** (`member_joined_channel` for the bot's own user) → scan full history, *merge* into the board, then enrich.
-- **`/concerto rebuild`** (also accepts `rescan`) → scan full history, *replace* the board, then enrich.
+### Data flows (Slack events → neutral ingestion)
+- **Message with links** → `apply_message`: set earliest `source_message_ts`, persist, then enrich.
+- **Reaction add/remove** → fetch the reacted message, then `apply_reactions`: re-extract links, re-parse *all* its reactions into counts (not the single delta), persist, then enrich.
+- **Bot joins channel** (`member_joined_channel` for the bot's own user) → scan full history into entries, then `merge_entries`, then enrich.
+- **`/concerto rebuild`** (also accepts `rescan`) → scan full history into entries, then `replace_board`, then enrich.
 
-History scans (`_collect_history_link_entries`) paginate `conversations.history` and read `reactions[].users` directly.
+Slack history scans (`_collect_history_link_entries`) paginate `conversations.history` and fold each message into the entries dict via `board.fold_message`; Slack's `reactions[]` already matches the neutral shape.
 
 ## Conventions
 - Only public/private channels are supported — guard channel-scoped work with `_is_supported_channel` (ids starting `C`/`G`).
