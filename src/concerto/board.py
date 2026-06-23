@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from html import escape
@@ -619,6 +620,14 @@ def register_board_routes(app: FastAPI) -> None:
                 service.unsubscribe(channel_id, queue)
 
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+def required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        msg = f"Missing required environment variable: {name}"
+        raise RuntimeError(msg)
+    return value
 
 
 def _service_from_request(request: Request) -> BoardService:

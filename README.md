@@ -1,6 +1,8 @@
 # concerto
 
-Basic Slack bot that tracks concert links in any public or private channel where the bot is a member, and stores them with per-user ticket status.
+Bot that tracks concert links in channels and stores them with aggregate
+ticket/interest counts. Runs against **Slack** or **Discord** (select with
+`CONCERTO_PLATFORM`); both share the same storage and web overview.
 
 ## Behavior
 - Monitors any channel the bot is in (public and private)
@@ -19,17 +21,28 @@ The bot connects to Slack over **Socket Mode** (an outbound WebSocket), so no
 public callback URL is required. An HTTP server still runs alongside it (serving
 a placeholder index and `/healthz`).
 
+## Platform selection
+- `CONCERTO_PLATFORM` (default `slack`) — `slack` or `discord`. The Discord
+  platform needs the optional `discord` extra (`uv sync --extra discord`).
+
 ## Required environment variables
+
+Slack (`CONCERTO_PLATFORM=slack`):
 - `SLACK_BOT_TOKEN` (`xoxb-...`) — Web API calls
 - `SLACK_APP_TOKEN` (`xapp-...`) — Socket Mode connection (scope `connections:write`)
+
+Discord (`CONCERTO_PLATFORM=discord`):
+- `DISCORD_BOT_TOKEN` — bot token from the Discord developer portal
 
 Optional:
 - `HOST` (default `127.0.0.1`)
 - `PORT` (default `8000`)
 - `CONCERTO_DB_PATH` (default `./concerto.db`)
-- `CONCERTO_SLASH_COMMAND` (default `/concerto`) — must match the slash command
-  registered in the Slack app; set e.g. `/concerto-dev` for a separate dev app
-  (a leading `/` is added if omitted)
+- `CONCERTO_SLASH_COMMAND` (default `/concerto`, Slack) — must match the slash
+  command registered in the Slack app; set e.g. `/concerto-dev` for a separate
+  dev app (a leading `/` is added if omitted)
+- `CONCERTO_DISCORD_COMMAND` (default `!concerto`, Discord) — the text-command
+  prefix; send `!concerto rebuild` in a channel to rescan its history
 - `LOG_LEVEL` (default `INFO`; set `DEBUG` to log incoming events and scrape results)
 
 ## Environment file
@@ -44,7 +57,8 @@ PORT=8000
 ```
 
 ## Persistence
-- State is persisted in SQLite (links with scraped band/date/venue, ticket holders, and interested users).
+- State is persisted in SQLite: links with scraped band/date/venue and aggregate
+  reaction counts only — the bot never stores who posted or reacted.
 - Default database path is `./concerto.db` and can be overridden via `CONCERTO_DB_PATH`.
 
 ## Run
@@ -79,3 +93,14 @@ docker compose up -d --build
   - `reactions:read` — from `reaction_added` / `reaction_removed`
   - `commands` — from the `/concerto` slash command
 - Install the app to your workspace and invite it to channels you want to track
+
+## Discord app setup
+- Create an application + bot in the Discord developer portal; copy the bot
+  token into `DISCORD_BOT_TOKEN`
+- Under **Privileged Gateway Intents**, enable **Message Content Intent** (the
+  bot needs message text to find links)
+- Invite the bot with the `bot` scope and the `Read Message History` +
+  `Add Reactions` / `Read Messages` permissions
+- There is no slash command; send `!concerto rebuild` (or your
+  `CONCERTO_DISCORD_COMMAND`) in a channel to rescan its history. Unlike Slack
+  there is no automatic backfill when the bot joins — run the command once.

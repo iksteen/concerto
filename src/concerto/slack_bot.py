@@ -28,6 +28,7 @@ from concerto.board import (
     LinkEntry,
     fold_message,
     register_board_routes,
+    required_env,
 )
 
 if TYPE_CHECKING:
@@ -360,8 +361,8 @@ class SlackBotService(BoardService):
 
 
 def create_app() -> FastAPI:
-    bot_token = _required_env("SLACK_BOT_TOKEN")
-    app_token = _required_env("SLACK_APP_TOKEN")
+    bot_token = required_env("SLACK_BOT_TOKEN")
+    app_token = required_env("SLACK_APP_TOKEN")
     database_path = os.getenv("CONCERTO_DB_PATH", "./concerto.db")
     command = _slash_command()
 
@@ -416,14 +417,6 @@ async def _run_rebuild_command(service: SlackBotService, channel_id: str) -> Non
         )
     except Exception:
         logger.exception("Unexpected error while rebuilding channel %s", channel_id)
-
-
-def _required_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        msg = f"Missing required environment variable: {name}"
-        raise RuntimeError(msg)
-    return value
 
 
 def _slash_command() -> str:
