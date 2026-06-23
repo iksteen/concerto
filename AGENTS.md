@@ -24,7 +24,7 @@ uv run python -m concerto   # FastAPI + uvicorn, defaults to 127.0.0.1:8000
 
 ## What this is
 
-A Slack bot that tracks concert links posted in channels, storing each link with per-user ticket status in SQLite. Reactions on link messages classify each user's status for that link: `:+1:`/`:thumbsup:`/`:ticket:` = has a ticket, `:question:`/`:grey_question:`/`:eyes:` = interested, `:pray:` = looking on TicketSwap. The bot only scrapes and stores; it does not post or pin any Slack messages.
+A Slack bot that tracks concert links posted in channels, storing each link with aggregate reaction counts in SQLite. Reactions on link messages classify status: `:+1:`/`:thumbsup:`/`:ticket:` = has a ticket, `:question:`/`:grey_question:`/`:eyes:` = interested, `:pray:` = looking on TicketSwap — but only the per-status counts are kept, never who reacted. The bot only scrapes and stores; it does not post or pin any Slack messages.
 
 `src/concerto/concert_scraper.py` is a standalone module/CLI that extracts band, date, and venue from concert pages across many Dutch venues (`python -m concerto.concert_scraper <url> ...`). It has no Slack dependency.
 
@@ -40,21 +40,23 @@ Three layers inside `slack_bot.py`:
 
 2. **`SlackBotService`**: Socket Mode client + in-memory state + Slack API orchestration. `run_socket_mode` calls `apps.connections.open` (with the app-level token) for a `wss://` URL, connects on a dedicated session (no total timeout, heartbeat pings), and reconnects on drop/`disconnect`. `_dispatch_socket_message` acks each envelope by `envelope_id` and dispatches `events_api`/`slash_commands`; heavy work runs in a background task via `_spawn` (which keeps a reference so the task is not GC'd). Caches a `ChannelBoard` per channel in `self._boards` and serializes all mutations behind one `asyncio.Lock` — methods suffixed `_locked` assume the lock is held. Slack calls go through `_api_call` (raises `SlackApiError` on `ok: false`, optional `token=` override for the app token); only read calls (`auth.test`, `conversations.history`, `apps.connections.open`) are used.
 
-3. **`BoardRepository`**: SQLite persistence via `aiosqlite` (WAL mode), spread across three tables (`links`, `link_posters`, `link_statuses`). `save_board` is a full delete-and-reinsert of a channel's rows in one transaction.
+3. **`BoardRepository`**: SQLite persistence via `aiosqlite` (WAL mode), across two tables (`links`, `link_posters`). `save_board` is a full delete-and-reinsert of a channel's rows in one transaction.
+
+> **No data migrations.** Schema migrations are fine (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN`, `DROP TABLE IF EXISTS` in `init`), but never write code that reshapes existing *rows* — we end up dragging it along forever. The board is fully reconstructable from Slack history, so to fix data just run a rebuild (`/concerto rebuild`). New columns get a sane default (e.g. counts default `0`) and are repopulated on the next rebuild.
 
 ### Domain model
-- `LinkEntry`: per-URL membership sets — `posters`, `ticket_holders`, `interested`, `ticketswap_wanted` — plus `source_message_ts`, scraped metadata (`band`, `event_date`, `venue`), and `expired` (page gone/redirected to a listing → event is in the past).
+- `LinkEntry`: per-URL `posters` set plus aggregate reaction counts — `going` (has a ticket), `undecided` (interested), `looking` (TicketSwap) — `source_message_ts`, scraped metadata (`band`, `event_date`, `venue`), and `expired` (page gone/redirected to a listing → event is in the past). We store **only counts**, never who reacted (privacy).
 - `ChannelBoard`: `dict[url, LinkEntry]`.
 
-### Status rules (`_apply_status_reaction`)
-Statuses are mutually exclusive and ticket-holder wins: adding `:+1:` clears `interested`/`ticketswap_wanted`; `:question:`/`:pray:` are ignored for users who already hold a ticket. Keep this precedence intact when changing reaction handling.
+### Status rules (`_aggregate_status_counts`)
+Reactions are re-parsed from the whole message into counts; each user counted once with ticket-holder winning: `:+1:` outranks `:question:`/`:eyes:`, which outranks `:pray:`. Keep this precedence intact when changing reaction handling.
 
 ### Metadata enrichment (`_enrich_links`)
 After links are persisted, `_enrich_links` runs the concert scraper (`concert_scraper.scrape`, reusing the bot's `aiohttp` session) **outside the lock** — never scrape while holding `self._lock`. It scrapes a URL at most once per process (`self._metadata_tried`) and skips links already resolved (`is_resolved` = has metadata or is expired); results are merged back and persisted under the lock. A scrape returns `expired=True` when the page is gone (404/410/401) or redirects to an ancestor path (event removed); scrape failures are logged and ignored — enrichment must never break link tracking.
 
 ### Data flows
 - **Message with links** → add poster, set earliest `source_message_ts`, persist, then enrich.
-- **Reaction add/remove** → fetch reacted message text, re-extract links, apply status, persist, then enrich.
+- **Reaction add/remove** → fetch the reacted message, re-extract links, re-parse *all* its reactions into counts (not the single delta), persist, then enrich.
 - **Bot joins channel** (`member_joined_channel` for the bot's own user) → scan full history, *merge* into the board, then enrich.
 - **`/concerto rebuild`** (also accepts `rescan`) → scan full history, *replace* the board, then enrich.
 

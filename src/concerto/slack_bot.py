@@ -59,9 +59,10 @@ IGNORED_LINK_DOMAINS = (
 @dataclass
 class LinkEntry:
     posters: set[str] = field(default_factory=set)
-    ticket_holders: set[str] = field(default_factory=set)
-    interested: set[str] = field(default_factory=set)
-    ticketswap_wanted: set[str] = field(default_factory=set)
+    # Aggregate reaction counts only — we never store who reacted (privacy).
+    going: int = 0  # have a ticket
+    undecided: int = 0  # interested, no ticket yet
+    looking: int = 0  # looking for a ticket on TicketSwap
     source_message_ts: str | None = None
     band: str | None = None
     event_date: str | None = None
@@ -132,14 +133,9 @@ class BoardRepository:
                 PRIMARY KEY (channel_id, url, user_id)
             );
 
-            CREATE TABLE IF NOT EXISTS link_statuses (
-                channel_id TEXT NOT NULL,
-                url TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                status TEXT NOT NULL,
-                PRIMARY KEY (channel_id, url, user_id),
-                CHECK (status IN ('ticket_holder', 'interested', 'ticketswap_wanted'))
-            );
+            -- We no longer store who reacted, only aggregate counts on `links`.
+            -- Run a channel rebuild to repopulate the counts.
+            DROP TABLE IF EXISTS link_statuses;
             """
         )
         await self._ensure_links_columns()
@@ -158,13 +154,18 @@ class BoardRepository:
         ):
             if column not in existing:
                 await self._db.execute(f"ALTER TABLE links ADD COLUMN {column} TEXT")
+        for column in ("going", "undecided", "looking"):
+            if column not in existing:
+                await self._db.execute(
+                    f"ALTER TABLE links ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                )
 
     async def load_board(self, channel_id: str) -> ChannelBoard:
         board = ChannelBoard()
 
         async with self._db.execute(
             "SELECT url, source_message_ts, band, event_date, venue, expired, "
-            "event_end_date FROM links WHERE channel_id = ?",
+            "event_end_date, going, undecided, looking FROM links WHERE channel_id = ?",
             (channel_id,),
         ) as cursor:
             async for row in cursor:
@@ -175,10 +176,12 @@ class BoardRepository:
                     venue=_opt_str(row[4]),
                     expired=bool(_opt_str(row[5])),
                     event_end_date=_opt_str(row[6]),
+                    going=int(row[7] or 0),
+                    undecided=int(row[8] or 0),
+                    looking=int(row[9] or 0),
                 )
 
         await self._load_memberships(channel_id, board.links, "link_posters", "posters")
-        await self._load_statuses(channel_id, board.links)
 
         return board
 
@@ -200,40 +203,18 @@ class BoardRepository:
                 if isinstance(group, set):
                     group.add(user_id)
 
-    async def _load_statuses(
-        self, channel_id: str, links: dict[str, LinkEntry]
-    ) -> None:
-        async with self._db.execute(
-            "SELECT url, user_id, status FROM link_statuses WHERE channel_id = ?",
-            (channel_id,),
-        ) as cursor:
-            async for row in cursor:
-                url = str(row[0])
-                user_id = str(row[1])
-                status = str(row[2])
-                entry = links.setdefault(url, LinkEntry())
-                if status == "ticket_holder":
-                    entry.ticket_holders.add(user_id)
-                elif status == "interested":
-                    entry.interested.add(user_id)
-                elif status == "ticketswap_wanted":
-                    entry.ticketswap_wanted.add(user_id)
-
     async def save_board(self, channel_id: str, board: ChannelBoard) -> None:
         await self._db.execute("DELETE FROM links WHERE channel_id = ?", (channel_id,))
         await self._db.execute(
             "DELETE FROM link_posters WHERE channel_id = ?", (channel_id,)
-        )
-        await self._db.execute(
-            "DELETE FROM link_statuses WHERE channel_id = ?", (channel_id,)
         )
 
         for url, entry in board.links.items():
             await self._db.execute(
                 "INSERT INTO links"
                 "(channel_id, url, source_message_ts, band, event_date, venue, "
-                "expired, event_end_date) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                "expired, event_end_date, going, undecided, looking) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     channel_id,
                     url,
@@ -243,22 +224,13 @@ class BoardRepository:
                     entry.venue,
                     "1" if entry.expired else None,
                     entry.event_end_date,
+                    entry.going,
+                    entry.undecided,
+                    entry.looking,
                 ),
             )
             await self._insert_memberships(
                 channel_id, url, "link_posters", entry.posters
-            )
-            await self._insert_status_memberships(
-                channel_id, url, "ticket_holder", entry.ticket_holders
-            )
-            await self._insert_status_memberships(
-                channel_id, url, "interested", entry.interested
-            )
-            await self._insert_status_memberships(
-                channel_id,
-                url,
-                "ticketswap_wanted",
-                entry.ticketswap_wanted,
             )
 
         await self._db.commit()
@@ -277,21 +249,6 @@ class BoardRepository:
         await self._db.executemany(
             query,
             [(channel_id, url, user_id) for user_id in sorted(user_ids)],
-        )
-
-    async def _insert_status_memberships(
-        self,
-        channel_id: str,
-        url: str,
-        status: str,
-        user_ids: set[str],
-    ) -> None:
-        if not user_ids:
-            return
-
-        await self._db.executemany(
-            "INSERT INTO link_statuses(channel_id, url, user_id, status) VALUES(?, ?, ?, ?)",
-            [(channel_id, url, user_id, status) for user_id in sorted(user_ids)],
         )
 
 
@@ -339,9 +296,9 @@ class SlackBotService:
                     ),
                     date=_parse_iso_date(entry.event_date),
                     end_date=_parse_iso_date(entry.event_end_date),
-                    going=len(entry.ticket_holders),
-                    undecided=len(entry.interested),
-                    looking=len(entry.ticketswap_wanted),
+                    going=entry.going,
+                    undecided=entry.undecided,
+                    looking=entry.looking,
                 )
                 for url, entry in board.links.items()
             ]
@@ -357,12 +314,8 @@ class SlackBotService:
             await self._handle_member_joined_channel_event(event)
             return
 
-        if event_type == "reaction_added":
-            await self._handle_reaction_event(event, added=True)
-            return
-
-        if event_type == "reaction_removed":
-            await self._handle_reaction_event(event, added=False)
+        if event_type in {"reaction_added", "reaction_removed"}:
+            await self._handle_reaction_event(event)
 
     async def _handle_member_joined_channel_event(self, event: dict[str, Any]) -> None:
         if not self._bot_user_id:
@@ -433,7 +386,7 @@ class SlackBotService:
         await self._rebuild_board_from_history(channel_id)
 
     async def _handle_reaction_event(  # noqa: PLR0911
-        self, event: dict[str, Any], *, added: bool
+        self, event: dict[str, Any]
     ) -> None:
         reaction = str(event.get("reaction", ""))
         if (
@@ -457,24 +410,26 @@ class SlackBotService:
         if not message_ts:
             return
 
-        user_id = str(event.get("user", ""))
-        if not user_id:
+        # Re-parse the whole message's reactions instead of tracking the delta,
+        # so we only ever keep aggregate counts and never store who reacted.
+        message = await self._get_message(channel_id, message_ts)
+        if message is None:
             return
 
-        text = await self._get_message_text(channel_id, message_ts)
-        if not text:
-            return
-
-        links = _extract_links(text)
+        links = _extract_links(str(message.get("text", "")))
         if not links:
             return
+
+        counts = _aggregate_status_counts(message.get("reactions"))
 
         async with self._lock:
             board = await self._get_board_locked(channel_id)
             for link in links:
                 entry = board.links.setdefault(link, LinkEntry())
                 _set_earliest_source_message_ts(entry, message_ts)
-                _apply_status_reaction(entry, reaction, user_id, added=added)
+                # ponytail: a URL reposted across messages shows the counts of
+                # whichever post was last reacted on; reactions cluster on one.
+                entry.going, entry.undecided, entry.looking = counts
             await self._persist_locked(channel_id, board)
 
         await self._enrich_links(channel_id, links)
@@ -564,7 +519,7 @@ class SlackBotService:
             if queue.empty():
                 queue.put_nowait(None)
 
-    async def _get_message_text(self, channel: str, message_ts: str) -> str:
+    async def _get_message(self, channel: str, message_ts: str) -> dict[str, Any] | None:
         history_response = await self._api_call(
             "conversations.history",
             {
@@ -578,15 +533,12 @@ class SlackBotService:
 
         messages = history_response.get("messages", [])
         if not isinstance(messages, list) or not messages:
-            return ""
+            return None
 
         message = messages[0]
-        if not isinstance(message, dict):
-            return ""
+        return message if isinstance(message, dict) else None
 
-        return str(message.get("text", ""))
-
-    async def _collect_history_link_entries(  # noqa: PLR0912
+    async def _collect_history_link_entries(
         self, channel_id: str
     ) -> dict[str, LinkEntry]:
         links_data: dict[str, LinkEntry] = {}
@@ -612,34 +564,19 @@ class SlackBotService:
                         continue
 
                     user_id = str(message.get("user", ""))
+                    going, undecided, looking = _aggregate_status_counts(
+                        message.get("reactions")
+                    )
                     for link in links:
                         entry = links_data.setdefault(link, LinkEntry())
                         if user_id:
                             entry.posters.add(user_id)
                         _set_earliest_source_message_ts(entry, message.get("ts"))
-
-                    reactions = message.get("reactions")
-                    if not isinstance(reactions, list):
-                        continue
-
-                    for reaction_obj in reactions:
-                        if not isinstance(reaction_obj, dict):
-                            continue
-                        reaction = str(reaction_obj.get("name", ""))
-                        users = reaction_obj.get("users")
-                        if not isinstance(users, list):
-                            continue
-                        for raw_user_id in users:
-                            reacting_user_id = str(raw_user_id)
-                            if not reacting_user_id:
-                                continue
-                            for link in links:
-                                _apply_status_reaction(
-                                    links_data[link],
-                                    reaction,
-                                    reacting_user_id,
-                                    added=True,
-                                )
+                        # ponytail: same URL across posts -> keep the highest
+                        # count per status; reactions normally sit on one post.
+                        entry.going = max(entry.going, going)
+                        entry.undecided = max(entry.undecided, undecided)
+                        entry.looking = max(entry.looking, looking)
 
             metadata = history_response.get("response_metadata")
             if not isinstance(metadata, dict):
@@ -929,58 +866,54 @@ def _is_ignored_url(url: str) -> bool:
     )
 
 
-def _update_membership(group: set[str], user_id: str, *, added: bool) -> None:
-    if added:
-        group.add(user_id)
-        return
+def _aggregate_status_counts(reactions: object) -> tuple[int, int, int]:
+    """Collapse a message's `reactions` into (going, undecided, looking).
 
-    group.discard(user_id)
-
-
-def _apply_status_reaction(
-    entry: LinkEntry, reaction: str, user_id: str, *, added: bool
-) -> None:
-    if reaction in PLUS_ONE_REACTIONS:
-        _update_membership(entry.ticket_holders, user_id, added=added)
-        if added:
-            entry.interested.discard(user_id)
-            entry.ticketswap_wanted.discard(user_id)
-        return
-
-    if reaction in QUESTION_REACTIONS:
-        if user_id in entry.ticket_holders:
-            return
-        _update_membership(entry.interested, user_id, added=added)
-        if added:
-            entry.ticketswap_wanted.discard(user_id)
-        return
-
-    if reaction in PRAY_REACTIONS:
-        if user_id in entry.ticket_holders:
-            return
-        _update_membership(entry.ticketswap_wanted, user_id, added=added)
-        if added:
-            entry.interested.discard(user_id)
+    Each user is counted once. A user holding a ticket (+1) outranks interest
+    (?), which outranks looking (pray) — so the categories never double-count.
+    User ids are used only transiently here; only the counts are returned.
+    """
+    ticket: set[str] = set()
+    interested: set[str] = set()
+    looking: set[str] = set()
+    if isinstance(reactions, list):
+        for reaction_obj in reactions:
+            if not isinstance(reaction_obj, dict):
+                continue
+            name = str(reaction_obj.get("name", ""))
+            users = reaction_obj.get("users")
+            if not isinstance(users, list):
+                continue
+            ids = {str(u) for u in users if str(u)}
+            if name in PLUS_ONE_REACTIONS:
+                ticket |= ids
+            elif name in QUESTION_REACTIONS:
+                interested |= ids
+            elif name in PRAY_REACTIONS:
+                looking |= ids
+    interested -= ticket
+    looking -= ticket | interested
+    return len(ticket), len(interested), len(looking)
 
 
 def _merge_link_entry(target: LinkEntry, source: LinkEntry) -> bool:
     before = (
         len(target.posters),
-        len(target.ticket_holders),
-        len(target.interested),
-        len(target.ticketswap_wanted),
+        target.going,
+        target.undecided,
+        target.looking,
         target.source_message_ts,
     )
     target.posters.update(source.posters)
-    target.ticket_holders.update(source.ticket_holders)
-    target.interested.update(source.interested)
-    target.ticketswap_wanted.update(source.ticketswap_wanted)
+    target.going = max(target.going, source.going)
+    target.undecided = max(target.undecided, source.undecided)
+    target.looking = max(target.looking, source.looking)
     _set_earliest_source_message_ts(target, source.source_message_ts)
     after = (
         len(target.posters),
-        len(target.ticket_holders),
-        len(target.interested),
-        len(target.ticketswap_wanted),
+        target.going,
+        target.undecided,
+        target.looking,
         target.source_message_ts,
     )
     return before != after
