@@ -40,12 +40,12 @@ Three layers inside `slack_bot.py`:
 
 2. **`SlackBotService`**: Socket Mode client + in-memory state + Slack API orchestration. `run_socket_mode` calls `apps.connections.open` (with the app-level token) for a `wss://` URL, connects on a dedicated session (no total timeout, heartbeat pings), and reconnects on drop/`disconnect`. `_dispatch_socket_message` acks each envelope by `envelope_id` and dispatches `events_api`/`slash_commands`; heavy work runs in a background task via `_spawn` (which keeps a reference so the task is not GC'd). Caches a `ChannelBoard` per channel in `self._boards` and serializes all mutations behind one `asyncio.Lock` — methods suffixed `_locked` assume the lock is held. Slack calls go through `_api_call` (raises `SlackApiError` on `ok: false`, optional `token=` override for the app token); only read calls (`auth.test`, `conversations.history`, `apps.connections.open`) are used.
 
-3. **`BoardRepository`**: SQLite persistence via `aiosqlite` (WAL mode), across two tables (`links`, `link_posters`). `save_board` is a full delete-and-reinsert of a channel's rows in one transaction.
+3. **`BoardRepository`**: SQLite persistence via `aiosqlite` (WAL mode), a single `links` table. `save_board` is a full delete-and-reinsert of a channel's rows in one transaction.
 
 > **No data migrations.** Schema migrations are fine (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN`, `DROP TABLE IF EXISTS` in `init`), but never write code that reshapes existing *rows* — we end up dragging it along forever. The board is fully reconstructable from Slack history, so to fix data just run a rebuild (`/concerto rebuild`). New columns get a sane default (e.g. counts default `0`) and are repopulated on the next rebuild.
 
 ### Domain model
-- `LinkEntry`: per-URL `posters` set plus aggregate reaction counts — `going` (has a ticket), `undecided` (interested), `looking` (TicketSwap) — `source_message_ts`, scraped metadata (`band`, `event_date`, `venue`), and `expired` (page gone/redirected to a listing → event is in the past). We store **only counts**, never who reacted (privacy).
+- `LinkEntry`: per-URL aggregate reaction counts — `going` (has a ticket), `undecided` (interested), `looking` (TicketSwap) — `source_message_ts`, scraped metadata (`band`, `event_date`, `venue`), and `expired` (page gone/redirected to a listing → event is in the past). We store **only counts**, never who posted or reacted (privacy).
 - `ChannelBoard`: `dict[url, LinkEntry]`.
 
 ### Status rules (`_aggregate_status_counts`)
@@ -55,7 +55,7 @@ Reactions are re-parsed from the whole message into counts; each user counted on
 After links are persisted, `_enrich_links` runs the concert scraper (`concert_scraper.scrape`, reusing the bot's `aiohttp` session) **outside the lock** — never scrape while holding `self._lock`. It scrapes a URL at most once per process (`self._metadata_tried`) and skips links already resolved (`is_resolved` = has metadata or is expired); results are merged back and persisted under the lock. A scrape returns `expired=True` when the page is gone (404/410/401) or redirects to an ancestor path (event removed); scrape failures are logged and ignored — enrichment must never break link tracking.
 
 ### Data flows
-- **Message with links** → add poster, set earliest `source_message_ts`, persist, then enrich.
+- **Message with links** → set earliest `source_message_ts`, persist, then enrich.
 - **Reaction add/remove** → fetch the reacted message, re-extract links, re-parse *all* its reactions into counts (not the single delta), persist, then enrich.
 - **Bot joins channel** (`member_joined_channel` for the bot's own user) → scan full history, *merge* into the board, then enrich.
 - **`/concerto rebuild`** (also accepts `rescan`) → scan full history, *replace* the board, then enrich.

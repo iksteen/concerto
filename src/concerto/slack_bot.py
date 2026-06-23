@@ -58,8 +58,7 @@ IGNORED_LINK_DOMAINS = (
 
 @dataclass
 class LinkEntry:
-    posters: set[str] = field(default_factory=set)
-    # Aggregate reaction counts only — we never store who reacted (privacy).
+    # Aggregate reaction counts only — we never store who posted or reacted.
     going: int = 0  # have a ticket
     undecided: int = 0  # interested, no ticket yet
     looking: int = 0  # looking for a ticket on TicketSwap
@@ -126,16 +125,10 @@ class BoardRepository:
                 PRIMARY KEY (channel_id, url)
             );
 
-            CREATE TABLE IF NOT EXISTS link_posters (
-                channel_id TEXT NOT NULL,
-                url TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                PRIMARY KEY (channel_id, url, user_id)
-            );
-
-            -- We no longer store who reacted, only aggregate counts on `links`.
-            -- Run a channel rebuild to repopulate the counts.
+            -- We no longer store who posted or reacted, only aggregate counts
+            -- on `links`. Run a channel rebuild to repopulate the counts.
             DROP TABLE IF EXISTS link_statuses;
+            DROP TABLE IF EXISTS link_posters;
             """
         )
         await self._ensure_links_columns()
@@ -181,33 +174,10 @@ class BoardRepository:
                     looking=int(row[9] or 0),
                 )
 
-        await self._load_memberships(channel_id, board.links, "link_posters", "posters")
-
         return board
-
-    async def _load_memberships(
-        self,
-        channel_id: str,
-        links: dict[str, LinkEntry],
-        table_name: str,
-        member_attr: str,
-    ) -> None:
-        # table_name is an internal constant, never user input.
-        query = f"SELECT url, user_id FROM {table_name} WHERE channel_id = ?"  # noqa: S608
-        async with self._db.execute(query, (channel_id,)) as cursor:
-            async for row in cursor:
-                url = str(row[0])
-                user_id = str(row[1])
-                entry = links.setdefault(url, LinkEntry())
-                group = getattr(entry, member_attr)
-                if isinstance(group, set):
-                    group.add(user_id)
 
     async def save_board(self, channel_id: str, board: ChannelBoard) -> None:
         await self._db.execute("DELETE FROM links WHERE channel_id = ?", (channel_id,))
-        await self._db.execute(
-            "DELETE FROM link_posters WHERE channel_id = ?", (channel_id,)
-        )
 
         for url, entry in board.links.items():
             await self._db.execute(
@@ -229,27 +199,8 @@ class BoardRepository:
                     entry.looking,
                 ),
             )
-            await self._insert_memberships(
-                channel_id, url, "link_posters", entry.posters
-            )
 
         await self._db.commit()
-
-    async def _insert_memberships(
-        self,
-        channel_id: str,
-        url: str,
-        table_name: str,
-        user_ids: set[str],
-    ) -> None:
-        if not user_ids:
-            return
-
-        query = f"INSERT INTO {table_name}(channel_id, url, user_id) VALUES(?, ?, ?)"
-        await self._db.executemany(
-            query,
-            [(channel_id, url, user_id) for user_id in sorted(user_ids)],
-        )
 
 
 class SlackBotService:
@@ -354,7 +305,6 @@ class SlackBotService:
             return
 
         text = str(event.get("text", ""))
-        user_id = str(event.get("user", ""))
         message_ts = _normalize_ts(event.get("ts"))
         links = _extract_links(text)
         if not links:
@@ -364,8 +314,6 @@ class SlackBotService:
             board = await self._get_board_locked(channel_id)
             for link in links:
                 entry = board.links.setdefault(link, LinkEntry())
-                if user_id:
-                    entry.posters.add(user_id)
                 _set_earliest_source_message_ts(entry, message_ts)
             await self._persist_locked(channel_id, board)
 
@@ -563,14 +511,11 @@ class SlackBotService:
                     if not links:
                         continue
 
-                    user_id = str(message.get("user", ""))
                     going, undecided, looking = _aggregate_status_counts(
                         message.get("reactions")
                     )
                     for link in links:
                         entry = links_data.setdefault(link, LinkEntry())
-                        if user_id:
-                            entry.posters.add(user_id)
                         _set_earliest_source_message_ts(entry, message.get("ts"))
                         # ponytail: same URL across posts -> keep the highest
                         # count per status; reactions normally sit on one post.
@@ -898,19 +843,16 @@ def _aggregate_status_counts(reactions: object) -> tuple[int, int, int]:
 
 def _merge_link_entry(target: LinkEntry, source: LinkEntry) -> bool:
     before = (
-        len(target.posters),
         target.going,
         target.undecided,
         target.looking,
         target.source_message_ts,
     )
-    target.posters.update(source.posters)
     target.going = max(target.going, source.going)
     target.undecided = max(target.undecided, source.undecided)
     target.looking = max(target.looking, source.looking)
     _set_earliest_source_message_ts(target, source.source_message_ts)
     after = (
-        len(target.posters),
         target.going,
         target.undecided,
         target.looking,
