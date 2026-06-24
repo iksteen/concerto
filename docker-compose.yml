@@ -13,8 +13,8 @@ services:
       PORT: "8000"
       CONCERTO_DB_PATH: /data/concerto.db
       CONCERTO_CONFIG: /config/concerto.toml
-    ports:
-      - "8000:8000"
+    # No published ports here: production fronts this with its own reverse proxy
+    # / networking. Use docker-compose.dev.yml to expose the port locally.
     volumes:
       # Named volume keeps the SQLite database across restarts and updates.
       - concerto-data:/data

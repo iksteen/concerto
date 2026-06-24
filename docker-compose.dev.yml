@@ -1,0 +1,10 @@
+# Dev-only overrides for docker-compose.yml. Publishes the HTTP port so you can
+# reach the board overview from your host. Compose merges `ports` additively and
+# can't remove them, so the base file omits ports and this opt-in file adds them.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+services:
+  concerto:
+    ports:
+      - "8000:8000"

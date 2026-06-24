@@ -86,8 +86,14 @@ docker compose up -d --build
   container sets `CONCERTO_CONFIG` to point at it.
 - The SQLite database is stored in the `concerto-data` named volume (mounted at
   `/data`), so it persists across restarts and image updates.
-- The HTTP server is published on port `8000`; `HOST`/`PORT`/`CONCERTO_DB_PATH`
-  are set for the container in `docker-compose.yml`.
+- `HOST`/`PORT`/`CONCERTO_DB_PATH` are set for the container in `docker-compose.yml`.
+- The base file does **not** publish a host port (so it won't clash with a
+  production reverse proxy / host networking); the server still listens on
+  `8000` inside the container. To reach the board overview from your host, add
+  the dev override, which maps host `8000` → container `8000`:
+  ```bash
+  docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+  ```
 
 ## Slack app setup
 
