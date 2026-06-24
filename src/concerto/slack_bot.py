@@ -7,32 +7,24 @@ supplies the Slack-specific channel check and message permalink.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
-import os
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
-import aiosqlite
-from fastapi import FastAPI
 
-from concerto import concert_scraper
 from concerto.board import (
     PLUS_ONE_REACTIONS,
     PRAY_REACTIONS,
     QUESTION_REACTIONS,
-    WEB_API_TIMEOUT_SECONDS,
     BoardRepository,
     BoardService,
     LinkEntry,
     fold_message,
-    register_board_routes,
-    required_env,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine
+    from collections.abc import Coroutine
 
 logger = logging.getLogger("concerto")
 
@@ -57,16 +49,19 @@ class SlackApiError(RuntimeError):
 class SlackBotService(BoardService):
     def __init__(
         self,
+        name: str,
         bot_token: str,
         app_token: str,
         session: aiohttp.ClientSession,
         repository: BoardRepository,
         command: str = "/concerto",
     ) -> None:
-        super().__init__(session, repository)
+        super().__init__(name, session, repository)
         self._bot_token = bot_token
         self._app_token = app_token
-        self._command = command
+        # Slack delivers the command with a leading slash; normalize so the
+        # configured value matches however it was written.
+        self._command = command if command.startswith("/") else f"/{command}"
         self._bot_user_id: str | None = None
         self._workspace_url: str | None = None
 
@@ -261,6 +256,14 @@ class SlackBotService(BoardService):
             raise SlackApiError(msg)
         return url
 
+    async def run(self) -> None:
+        await self.run_socket_mode()
+
+    async def close(self) -> None:
+        # Nothing to close: the socket loop owns its session and stops when its
+        # task is cancelled on shutdown.
+        pass
+
     async def run_socket_mode(self) -> None:
         # The websocket is long-lived, so it gets its own session without a
         # total timeout; heartbeat pings detect a dead connection.
@@ -360,45 +363,6 @@ class SlackBotService(BoardService):
         }
 
 
-def create_app() -> FastAPI:
-    bot_token = required_env("SLACK_BOT_TOKEN")
-    app_token = required_env("SLACK_APP_TOKEN")
-    database_path = os.getenv("CONCERTO_DB_PATH", "./concerto.db")
-    command = _slash_command()
-
-    @contextlib.asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[dict[str, Any]]:
-        timeout = aiohttp.ClientTimeout(total=WEB_API_TIMEOUT_SECONDS)
-        async with (
-            aiohttp.ClientSession(
-                timeout=timeout, max_field_size=concert_scraper.MAX_HEADER_BYTES
-            ) as session,
-            aiosqlite.connect(database_path) as db,
-        ):
-            repository = BoardRepository(db)
-            await repository.init()
-            service = SlackBotService(
-                bot_token=bot_token,
-                app_token=app_token,
-                session=session,
-                repository=repository,
-                command=command,
-            )
-            await service.initialize()
-            # Slack is handled over Socket Mode, running alongside the HTTP app.
-            socket_task = asyncio.create_task(service.run_socket_mode())
-            try:
-                yield {"service": service}
-            finally:
-                socket_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await socket_task
-
-    app = FastAPI(lifespan=lifespan)
-    register_board_routes(app)
-    return app
-
-
 async def _run_event(service: SlackBotService, event: dict[str, Any]) -> None:
     try:
         await service.handle_event(event)
@@ -417,13 +381,6 @@ async def _run_rebuild_command(service: SlackBotService, channel_id: str) -> Non
         )
     except Exception:
         logger.exception("Unexpected error while rebuilding channel %s", channel_id)
-
-
-def _slash_command() -> str:
-    # Slack delivers the command with a leading slash (e.g. "/concerto-dev"),
-    # so normalize the configured value to match regardless of how it's written.
-    command = os.getenv("CONCERTO_SLASH_COMMAND", "/concerto").strip()
-    return command if command.startswith("/") else f"/{command}"
 
 
 def _normalize_workspace_url(value: object) -> str | None:

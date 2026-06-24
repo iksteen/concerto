@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from html import escape
@@ -105,6 +104,9 @@ class BoardRepository:
         await self._db.executescript(
             """
             PRAGMA journal_mode=WAL;
+            -- Multiple connectors keep their own connection to this file; wait
+            -- briefly rather than erroring when another holds the write lock.
+            PRAGMA busy_timeout=5000;
 
             CREATE TABLE IF NOT EXISTS links (
                 channel_id TEXT NOT NULL,
@@ -205,14 +207,29 @@ class BoardService:
     """
 
     def __init__(
-        self, session: aiohttp.ClientSession, repository: BoardRepository
+        self,
+        connector_id: str,
+        session: aiohttp.ClientSession,
+        repository: BoardRepository,
     ) -> None:
+        self._connector_id = connector_id
         self._session = session
         self._repository = repository
         self._boards: dict[str, ChannelBoard] = {}
         self._metadata_tried: set[str] = set()
         self._lock = asyncio.Lock()
         self._subscribers: dict[str, set[asyncio.Queue[None]]] = {}
+
+    @property
+    def connector_id(self) -> str:
+        return self._connector_id
+
+    def _board_key(self, channel_id: str) -> str:
+        # Persisted channel rows are namespaced by connector so multiple
+        # connectors (e.g. two Slack workspaces) sharing one database can't
+        # collide on the same channel id. The in-memory cache stays keyed by
+        # the raw channel id since each service only sees its own channels.
+        return f"{self._connector_id}/{channel_id}"
 
     # --- platform hooks (overridden by subclasses) ---
 
@@ -221,6 +238,15 @@ class BoardService:
 
     def message_url(self, channel_id: str, source_message_ts: str | None) -> str | None:  # noqa: ARG002
         return None
+
+    # --- connector lifecycle (overridden by subclasses) ---
+
+    async def run(self) -> None:
+        """Run the connector's gateway until its task is cancelled."""
+        raise NotImplementedError
+
+    async def close(self) -> None:
+        """Gracefully stop the connector; called on shutdown before cancel."""
 
     # --- read side ---
 
@@ -368,12 +394,12 @@ class BoardService:
         if board is not None:
             return board
 
-        board = await self._repository.load_board(channel_id)
+        board = await self._repository.load_board(self._board_key(channel_id))
         self._boards[channel_id] = board
         return board
 
     async def _persist_locked(self, channel_id: str, board: ChannelBoard) -> None:
-        await self._repository.save_board(channel_id, board)
+        await self._repository.save_board(self._board_key(channel_id), board)
         self._notify(channel_id)
 
     # --- SSE subscribers ---
@@ -578,8 +604,8 @@ def _ts_key(ts: str) -> tuple[int, int]:
 def register_board_routes(app: FastAPI) -> None:
     """Add the platform-agnostic web routes to ``app``.
 
-    Routes read the active :class:`BoardService` from ``request.state.service``,
-    which the platform's lifespan must populate.
+    Routes resolve the connector's :class:`BoardService` from the
+    ``request.state.services`` registry, which the lifespan must populate.
     """
 
     @app.get("/")
@@ -590,17 +616,19 @@ def register_board_routes(app: FastAPI) -> None:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/board/{channel_id}", response_class=HTMLResponse)
-    async def board(channel_id: str, request: Request) -> str:
-        service = _service_from_request(request)
+    @app.get("/board/{connector}/{channel_id}", response_class=HTMLResponse)
+    async def board(connector: str, channel_id: str, request: Request) -> str:
+        service = _service_from_request(request, connector)
         if not service.is_supported_channel(channel_id):
             raise HTTPException(status_code=404, detail="unknown channel")
         views = await service.event_views(channel_id)
-        return render_overview(channel_id, views)
+        return render_overview(f"{connector}/{channel_id}", views)
 
-    @app.get("/board/{channel_id}/events")
-    async def board_events(channel_id: str, request: Request) -> StreamingResponse:
-        service = _service_from_request(request)
+    @app.get("/board/{connector}/{channel_id}/events")
+    async def board_events(
+        connector: str, channel_id: str, request: Request
+    ) -> StreamingResponse:
+        service = _service_from_request(request, connector)
         if not service.is_supported_channel(channel_id):
             raise HTTPException(status_code=404, detail="unknown channel")
 
@@ -622,18 +650,13 @@ def register_board_routes(app: FastAPI) -> None:
         return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-def required_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        msg = f"Missing required environment variable: {name}"
-        raise RuntimeError(msg)
-    return value
-
-
-def _service_from_request(request: Request) -> BoardService:
-    service = getattr(request.state, "service", None)
+def _service_from_request(request: Request, connector: str) -> BoardService:
+    services = getattr(request.state, "services", None)
+    if not isinstance(services, dict):
+        raise HTTPException(status_code=500, detail="services not initialized")
+    service = services.get(connector)
     if not isinstance(service, BoardService):
-        raise HTTPException(status_code=500, detail="service not initialized")
+        raise HTTPException(status_code=404, detail="unknown connector")
     return service
 
 

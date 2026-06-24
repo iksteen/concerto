@@ -9,30 +9,25 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 from typing import TYPE_CHECKING, Any
 
-import aiohttp
-import aiosqlite
 import discord
-from fastapi import FastAPI
 
-from concerto import concert_scraper
 from concerto.board import (
     PLUS_ONE_REACTIONS,
     PRAY_REACTIONS,
     QUESTION_REACTIONS,
-    WEB_API_TIMEOUT_SECONDS,
     BoardRepository,
     BoardService,
     LinkEntry,
     fold_message,
-    register_board_routes,
-    required_env,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Coroutine
+    from collections.abc import Coroutine
+
+    import aiohttp
+    import aiosqlite
 
 logger = logging.getLogger("concerto")
 
@@ -59,13 +54,14 @@ _UNICODE_TO_NAME = {
 class DiscordBotService(BoardService):
     def __init__(
         self,
+        name: str,
         token: str,
         session: aiohttp.ClientSession,
         repository: BoardRepository,
         db: aiosqlite.Connection,
         command: str = "!concerto",
     ) -> None:
-        super().__init__(session, repository)
+        super().__init__(name, session, repository)
         self._token = token
         self._command = command
         self._db = db
@@ -208,12 +204,15 @@ class DiscordBotService(BoardService):
     async def _track(self, message: discord.Message) -> None:
         channel_id = str(message.channel.id)
         guild_id = str(message.guild.id) if message.guild else None
-        await self._db.execute(
-            "INSERT OR IGNORE INTO discord_tracked_channels(channel_id, guild_id) "
-            "VALUES(?, ?)",
-            (channel_id, guild_id),
-        )
-        await self._db.commit()
+        # Share the board lock so this commit can't flush a board save's
+        # half-done transaction on the same connection.
+        async with self._lock:
+            await self._db.execute(
+                "INSERT OR IGNORE INTO discord_tracked_channels"
+                "(channel_id, guild_id) VALUES(?, ?)",
+                (channel_id, guild_id),
+            )
+            await self._db.commit()
         self._tracked.add(channel_id)
         # Backfill links posted before tracking, in the background; _rebuild
         # handles the ⏳→✅ feedback on this command message.
@@ -221,12 +220,15 @@ class DiscordBotService(BoardService):
 
     async def _untrack(self, message: discord.Message) -> None:
         channel_id = str(message.channel.id)
-        await self._db.execute(
-            "DELETE FROM discord_tracked_channels WHERE channel_id = ?", (channel_id,)
-        )
-        await self._db.commit()
+        async with self._lock:
+            await self._db.execute(
+                "DELETE FROM discord_tracked_channels WHERE channel_id = ?",
+                (channel_id,),
+            )
+            await self._db.commit()
         self._tracked.discard(channel_id)
-        # Drop the channel's tracked links so the board doesn't go stale.
+        # Drop the channel's tracked links so the board doesn't go stale
+        # (replace_board takes the lock itself, so it's outside the block above).
         await self.replace_board(channel_id, {})
         await message.add_reaction(_DONE)
 
@@ -277,41 +279,3 @@ async def _normalize_reactions(message: discord.Message) -> list[dict[str, Any]]
         users = [str(user.id) async for user in reaction.users()]
         result.append({"name": name, "users": users})
     return result
-
-
-def create_app() -> FastAPI:
-    token = required_env("DISCORD_BOT_TOKEN")
-    database_path = os.getenv("CONCERTO_DB_PATH", "./concerto.db")
-    command = os.getenv("CONCERTO_DISCORD_COMMAND", "!concerto").strip()
-
-    @contextlib.asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[dict[str, Any]]:
-        timeout = aiohttp.ClientTimeout(total=WEB_API_TIMEOUT_SECONDS)
-        async with (
-            aiohttp.ClientSession(
-                timeout=timeout, max_field_size=concert_scraper.MAX_HEADER_BYTES
-            ) as session,
-            aiosqlite.connect(database_path) as db,
-        ):
-            repository = BoardRepository(db)
-            await repository.init()
-            service = DiscordBotService(
-                token=token,
-                session=session,
-                repository=repository,
-                db=db,
-                command=command,
-            )
-            await service.setup()
-            client_task = asyncio.create_task(service.run())
-            try:
-                yield {"service": service}
-            finally:
-                await service.close()
-                client_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await client_task
-
-    app = FastAPI(lifespan=lifespan)
-    register_board_routes(app)
-    return app

@@ -14,6 +14,7 @@ wheels/
 
 # Secrets
 .env
+concerto.toml
 
 # Local database
 concerto.db

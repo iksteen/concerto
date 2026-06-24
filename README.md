@@ -1,65 +1,76 @@
 # concerto
 
-Bot that tracks concert links in channels and stores them with aggregate
-ticket/interest counts. Runs against **Slack** or **Discord** (select with
-`CONCERTO_PLATFORM`); both share the same storage and web overview.
+Bot that tracks concert links in chat channels and stores them with aggregate
+ticket/interest counts. A single process hosts **any number of connectors at
+once** — multiple Slack workspaces and/or Discord bots — configured in one TOML
+file. All connectors share the same storage and web overview, but each
+connector's channels are namespaced so they never collide.
 
 ## Behavior
-- Monitors any channel the bot is in (public and private)
+- Monitors any channel a connector is in (Slack: public/private; Discord: channels you `!concerto track`)
 - Extracts links from channel messages and adds them to a tracked list
 - Scrapes each tracked link for concert metadata (band, date, venue) and stores it alongside the link
 - Marks a link as expired when its page is gone (404/410/401) or redirects to a listing page (the event has been removed and is in the past)
-- Serves a web overview of a channel's upcoming events at `GET /board/{channel_id}`, grouped into Date unknown (top), This week, This month, and Upcoming, ordered by date, with expired/past events hidden; each event shows emoji counts of how many have a ticket (🎫), are interested (👀), or are looking for a ticket (🙏)
-- On `member_joined_channel`, scans channel history for existing links and `:+1:` / `:question:` / `:pray:` reactions
+- Serves a web overview of a channel's upcoming events at `GET /board/{connector}/{channel_id}` (`connector` is the name from the config), grouped into Date unknown (top), This week, This month, and Upcoming, ordered by date, with expired/past events hidden; each event shows emoji counts of how many have a ticket (🎫), are interested (👀), or are looking for a ticket (🙏)
 - `:+1:` (or `:thumbsup:` / `:ticket:`): user has a ticket
 - `:question:` (or `:grey_question:` / `:eyes:`): user is interested, no ticket yet
 - `:pray:`: user is trying to get a sold-out ticket via TicketSwap
-- Run `/concerto rebuild` in a channel to fully rescan that channel's history
+- Slack: rescan a channel's history with the `/concerto rebuild` slash command, and the bot backfills automatically when invited to a channel
+- Discord: tracking is opt-in — `!concerto track` a channel (backfills in the background), `!concerto untrack` to stop, `!concerto rebuild` to rescan
 - Tracked data is stored in SQLite only; the bot never posts messages (on Discord it acknowledges `track`/`untrack`/`rebuild` commands by reacting to them)
 
-The bot connects to Slack over **Socket Mode** (an outbound WebSocket), so no
-public callback URL is required. An HTTP server still runs alongside it (serving
-a placeholder index and `/healthz`).
+Slack connectors connect over **Socket Mode** (an outbound WebSocket), so no
+public callback URL is required. An HTTP server runs alongside all connectors
+(serving a placeholder index, `/healthz`, and the board overview).
 
-## Platform selection
-- `CONCERTO_PLATFORM` (default `slack`) — `slack` or `discord`. Both platforms'
-  dependencies are always installed; no extra is needed.
+## Configuration
 
-## Required environment variables
+Connectors are defined in a TOML file. Copy the example and fill in tokens:
 
-Slack (`CONCERTO_PLATFORM=slack`):
-- `SLACK_BOT_TOKEN` (`xoxb-...`) — Web API calls
-- `SLACK_APP_TOKEN` (`xapp-...`) — Socket Mode connection (scope `connections:write`)
-
-Discord (`CONCERTO_PLATFORM=discord`):
-- `DISCORD_BOT_TOKEN` — bot token from the Discord developer portal
-
-Optional:
-- `HOST` (default `127.0.0.1`)
-- `PORT` (default `8000`)
-- `CONCERTO_DB_PATH` (default `./concerto.db`)
-- `CONCERTO_SLASH_COMMAND` (default `/concerto`, Slack) — must match the slash
-  command registered in the Slack app; set e.g. `/concerto-dev` for a separate
-  dev app (a leading `/` is added if omitted)
-- `CONCERTO_DISCORD_COMMAND` (default `!concerto`, Discord) — the text-command
-  prefix; send `!concerto rebuild` in a channel to rescan its history
-- `LOG_LEVEL` (default `INFO`; set `DEBUG` to log incoming events and scrape results)
-
-## Environment file
-- `.env` is loaded automatically at startup via `python-dotenv`.
-- Example:
-```env
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
-CONCERTO_DB_PATH=./concerto.db
-HOST=127.0.0.1
-PORT=8000
+```bash
+cp concerto.toml.example concerto.toml
+# edit concerto.toml
 ```
+
+```toml
+[[connector]]
+type = "slack"
+name = "work"            # used in the board URL (/board/work/<channel>) + storage namespace
+bot_token = "xoxb-..."   # Web API
+app_token = "xapp-..."   # Socket Mode (connections:write)
+
+[[connector]]
+type = "slack"
+name = "club"
+bot_token = "xoxb-..."
+app_token = "xapp-..."
+
+[[connector]]
+type = "discord"
+name = "main"
+token = "..."            # bot token from the developer portal
+```
+
+- Each connector needs a unique `name` (no `/`). It appears in the board URL and
+  namespaces that connector's channels in storage, so two Slack workspaces with
+  the same channel id never collide.
+- Optional per-connector `command` overrides the default (`/concerto` for Slack,
+  `!concerto` for Discord).
+- An optional `[server]` table sets `db_path`, `host`, `port`, `log_level`.
+
+The process finds its config at `CONCERTO_CONFIG` (default `./concerto.toml`).
+These environment variables are used as fallback when the matching `[server]`
+key is omitted: `CONCERTO_DB_PATH` (default `./concerto.db`), `HOST` (default
+`127.0.0.1`), `PORT` (default `8000`), `LOG_LEVEL` (default `INFO`; `DEBUG` logs
+incoming events and scrape results). `.env` is still loaded at startup.
 
 ## Persistence
 - State is persisted in SQLite: links with scraped band/date/venue and aggregate
   reaction counts only — the bot never stores who posted or reacted.
-- Default database path is `./concerto.db` and can be overridden via `CONCERTO_DB_PATH`.
+- Rows are keyed by `connector/channel_id`, so all connectors share one database
+  file safely.
+- Default database path is `./concerto.db` (override via `[server].db_path` or
+  `CONCERTO_DB_PATH`).
 
 ## Run
 ```bash
@@ -68,15 +79,21 @@ uv run python -m concerto
 
 ## Docker
 ```bash
+cp concerto.toml.example concerto.toml   # edit it
 docker compose up -d --build
 ```
-- Reads `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` from `.env` (required).
-- The SQLite database is stored in the `concerto-data` named volume (mounted at `/data`), so it persists across restarts and image updates.
-- The HTTP server is published on port `8000`; `HOST`/`PORT`/`CONCERTO_DB_PATH` are set for the container in `docker-compose.yml`.
+- `concerto.toml` is mounted read-only at `/config/concerto.toml` and the
+  container sets `CONCERTO_CONFIG` to point at it.
+- The SQLite database is stored in the `concerto-data` named volume (mounted at
+  `/data`), so it persists across restarts and image updates.
+- The HTTP server is published on port `8000`; `HOST`/`PORT`/`CONCERTO_DB_PATH`
+  are set for the container in `docker-compose.yml`.
 
 ## Slack app setup
+
+Do this once per Slack workspace connector:
 - Enable **Socket Mode**
-- Create an **app-level token** with the `connections:write` scope (this is `SLACK_APP_TOKEN`)
+- Create an **app-level token** with the `connections:write` scope (this is the connector's `app_token`)
 - Enable **Event Subscriptions** (no Request URL needed in Socket Mode) and subscribe to bot events:
   - `message.channels`
   - `message.groups`
@@ -92,11 +109,12 @@ docker compose up -d --build
     channel's existing links and reaction emoji when the bot is invited
   - `reactions:read` — from `reaction_added` / `reaction_removed`
   - `commands` — from the `/concerto` slash command
-- Install the app to your workspace and invite it to channels you want to track
+- Install the app to your workspace and invite it to channels you want to track.
+  The `bot_token` is the workspace bot token (`xoxb-...`).
 
 ## Discord app setup
 - Create an application + bot in the Discord developer portal; copy the bot
-  token into `DISCORD_BOT_TOKEN`
+  token into the connector's `token`
 - Under **Privileged Gateway Intents**, enable **Message Content Intent** (the
   bot needs message text to find links)
 - Invite the bot with the `bot` scope and these permissions: **View Channels**,
@@ -112,5 +130,5 @@ docker compose up -d --build
   ❌ refused (e.g. `rebuild` in an untracked channel); `track`/`rebuild` show ⏳
   while scanning, swapped for ✅ when finished.
 - `!concerto rebuild` (or `rescan`) re-scans a tracked channel's history on demand.
-- Customise the command prefix with `CONCERTO_DISCORD_COMMAND` (default
+- Customise the command prefix with the connector's `command` (default
   `!concerto`).

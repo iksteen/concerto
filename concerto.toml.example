@@ -1,0 +1,34 @@
+# concerto configuration. Copy to concerto.toml and fill in your tokens.
+# Point the process at it with CONCERTO_CONFIG (defaults to ./concerto.toml).
+#
+# One process hosts every connector below at once. Each connector's board is
+# served at /board/<name>/<channel_id>.
+
+# Optional process-level settings (env vars CONCERTO_DB_PATH / HOST / PORT /
+# LOG_LEVEL are used as fallback when a key is omitted here).
+[server]
+db_path = "./concerto.db"
+host = "127.0.0.1"
+port = 8000
+log_level = "INFO"
+
+# A Slack workspace. Add as many [[connector]] blocks as you like.
+[[connector]]
+type = "slack"
+name = "work"                    # used in the board URL + storage namespace
+bot_token = "xoxb-..."           # Web API
+app_token = "xapp-..."           # Socket Mode (connections:write)
+command = "/concerto"            # optional, slash command (default /concerto)
+
+[[connector]]
+type = "slack"
+name = "club"
+bot_token = "xoxb-..."
+app_token = "xapp-..."
+
+# A Discord bot.
+[[connector]]
+type = "discord"
+name = "main"
+token = "..."                    # bot token from the developer portal
+command = "!concerto"            # optional, text-command prefix (default !concerto)

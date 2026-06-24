@@ -3,18 +3,23 @@ services:
     build: .
     image: concerto
     restart: unless-stopped
-    # Provides SLACK_BOT_TOKEN and SLACK_APP_TOKEN (and any other overrides).
-    env_file: .env
+    # Optional overrides (LOG_LEVEL etc.); tokens now live in concerto.toml.
+    env_file:
+      - path: .env
+        required: false
     environment:
       # Container-correct values that take precedence over anything in .env.
       HOST: 0.0.0.0
       PORT: "8000"
       CONCERTO_DB_PATH: /data/concerto.db
+      CONCERTO_CONFIG: /config/concerto.toml
     ports:
       - "8000:8000"
     volumes:
       # Named volume keeps the SQLite database across restarts and updates.
       - concerto-data:/data
+      # Your connector config (copy concerto.toml.example -> concerto.toml).
+      - ./concerto.toml:/config/concerto.toml:ro
     healthcheck:
       test:
         - CMD
