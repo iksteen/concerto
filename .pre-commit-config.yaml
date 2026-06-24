@@ -20,3 +20,11 @@ repos:
           - --allow-untyped-decorators
         types_or: [python, pyi]
         require_serial: true
+
+      - id: pytest
+        name: pytest
+        language: system
+        entry: uv run pytest
+        pass_filenames: false
+        types: [python]
+        require_serial: true

@@ -19,11 +19,20 @@ dependencies = [
 dev = [
     "mypy>=1.19.1",
     "pre-commit>=4.5.1",
+    "pytest>=8",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [build-system]
 requires = ["uv_build>=0.10.11,<0.11.0"]
 build-backend = "uv_build"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests: asserts are the point, magic values in assertions are fine, and the
+# test package needs no __init__.
+"tests/**" = ["S101", "INP001", "PLR2004"]
 
 [tool.ruff.lint]
 select = ["ALL"]

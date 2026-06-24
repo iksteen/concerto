@@ -124,6 +124,10 @@ Do this once per Slack workspace connector:
 - **Tracking is opt-in per channel.** The bot ignores every channel until you
   send `!concerto track` in it; `!concerto untrack` stops tracking. Tracked
   channels are stored in SQLite and survive restarts.
+- The `track`/`untrack`/`rebuild` commands are **privileged**: only members with
+  **Manage Channels** on that channel may run them (administrators and the guild
+  owner have it implicitly). Everyone else gets a 🚫 reaction and the command is
+  ignored.
 - `track` automatically backfills links posted before the bot joined (a
   background rebuild); `untrack` clears that channel's stored links.
 - Commands are acknowledged with a reaction on your command message: ✅ done,

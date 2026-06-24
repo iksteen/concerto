@@ -1,10 +1,11 @@
-"""Self-checks for multi-connector hosting: storage namespacing + config rules."""
+"""Tests for multi-connector hosting: storage namespacing + config validation."""
 
 from __future__ import annotations
 
 import asyncio
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import aiosqlite
@@ -18,7 +19,7 @@ class _Svc(BoardService):
         return True
 
 
-async def _check_namespacing() -> None:
+async def _run_namespacing() -> None:
     dbs: list[aiosqlite.Connection] = []
 
     async def service(session: aiohttp.ClientSession, path: str, name: str) -> _Svc:
@@ -53,12 +54,18 @@ async def _check_namespacing() -> None:
                     await db.close()
 
     assert [v.url for v in va] == ["https://x/1"], va
-    assert va[0].going == 2 and va[0].band == "A"
+    assert va[0].going == 2
+    assert va[0].band == "A"
     assert [v.url for v in vb] == ["https://x/2"], vb
-    assert vb[0].going == 5 and vb[0].band == "B"
+    assert vb[0].going == 5
+    assert vb[0].band == "B"
 
 
-def _check_validation() -> None:
+def test_storage_is_namespaced_per_connector() -> None:
+    asyncio.run(_run_namespacing())
+
+
+def test_validate_connectors_accepts_a_good_config() -> None:
     good = {
         "connector": [
             {"type": "slack", "name": "work", "bot_token": "b", "app_token": "a"},
@@ -67,13 +74,19 @@ def _check_validation() -> None:
     }
     assert len(_validate_connectors(good)) == 2
 
-    bad = [
+
+def test_validate_connectors_rejects_bad_configs() -> None:
+    bad: list[dict[str, Any]] = [
         {},  # no connectors
         {"connector": []},  # empty
-        {"connector": [{"type": "slack", "name": "x", "bot_token": "b"}]},  # no app_token
+        {
+            "connector": [{"type": "slack", "name": "x", "bot_token": "b"}]
+        },  # no app_token
         {"connector": [{"type": "discord", "name": "x"}]},  # no token
         {"connector": [{"type": "irc", "name": "x", "token": "t"}]},  # unknown type
-        {"connector": [{"type": "discord", "name": "a/b", "token": "t"}]},  # slash in name
+        {
+            "connector": [{"type": "discord", "name": "a/b", "token": "t"}]
+        },  # slash in name
         {
             "connector": [
                 {"type": "discord", "name": "dup", "token": "t"},
@@ -88,9 +101,3 @@ def _check_validation() -> None:
             continue
         msg = f"expected RuntimeError for {cfg!r}"
         raise AssertionError(msg)
-
-
-if __name__ == "__main__":
-    _check_validation()
-    asyncio.run(_check_namespacing())
-    print("ok")

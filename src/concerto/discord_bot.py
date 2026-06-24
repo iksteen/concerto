@@ -40,6 +40,7 @@ TRACKED_REACTIONS = PLUS_ONE_REACTIONS | QUESTION_REACTIONS | PRAY_REACTIONS
 _WORKING = "\N{HOURGLASS WITH FLOWING SAND}"
 _DONE = "\N{WHITE HEAVY CHECK MARK}"
 _REFUSED = "\N{CROSS MARK}"
+_DENIED = "\N{NO ENTRY SIGN}"  # command refused: caller lacks permission
 
 _UNICODE_TO_NAME = {
     "\N{THUMBS UP SIGN}": "thumbsup",
@@ -161,20 +162,31 @@ class DiscordBotService(BoardService):
 
         # Commands work in any channel (you must be able to `track` an
         # untracked one); the gate below only guards passive link ingestion.
-        content = message.content.strip().lower()
-        if content == f"{self._command} track":
-            await self._track(message)
-            return
-        if content == f"{self._command} untrack":
-            await self._untrack(message)
-            return
-        if content in {f"{self._command} rebuild", f"{self._command} rescan"}:
-            await self._rebuild(message)
+        command = self._match_command(message.content.strip().lower())
+        if command is not None:
+            # Privileged: only members who can manage the channel may run them.
+            if not _can_manage(message):
+                await message.add_reaction(_DENIED)
+                return
+            if command == "track":
+                await self._track(message)
+            elif command == "untrack":
+                await self._untrack(message)
+            else:
+                await self._rebuild(message)
             return
 
         if not self.is_supported_channel(str(message.channel.id)):
             return
         await self.apply_message(str(message.channel.id), message.id, message.content)
+
+    def _match_command(self, content: str) -> str | None:
+        return {
+            f"{self._command} track": "track",
+            f"{self._command} untrack": "untrack",
+            f"{self._command} rebuild": "rebuild",
+            f"{self._command} rescan": "rebuild",
+        }.get(content)
 
     async def _on_reaction(self, payload: discord.RawReactionActionEvent) -> None:
         if payload.guild_id is None:
@@ -252,6 +264,21 @@ class DiscordBotService(BoardService):
             return
         with contextlib.suppress(discord.HTTPException):
             await message.remove_reaction(_WORKING, user)
+
+
+def _can_manage(message: discord.Message) -> bool:
+    """Whether the command's author may run the privileged !concerto commands.
+
+    Requires Manage Channels on the command's channel — administrators and the
+    guild owner have it implicitly, and per-channel moderator overrides count.
+    """
+    author = message.author
+    channel = message.channel
+    if not isinstance(author, discord.Member) or not isinstance(
+        channel, discord.abc.GuildChannel
+    ):
+        return False
+    return channel.permissions_for(author).manage_channels
 
 
 def _reaction_name(emoji: discord.PartialEmoji | discord.Emoji | str) -> str:
