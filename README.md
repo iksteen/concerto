@@ -22,8 +22,8 @@ public callback URL is required. An HTTP server still runs alongside it (serving
 a placeholder index and `/healthz`).
 
 ## Platform selection
-- `CONCERTO_PLATFORM` (default `slack`) — `slack` or `discord`. The Discord
-  platform needs the optional `discord` extra (`uv sync --extra discord`).
+- `CONCERTO_PLATFORM` (default `slack`) — `slack` or `discord`. Both platforms'
+  dependencies are always installed; no extra is needed.
 
 ## Required environment variables
 

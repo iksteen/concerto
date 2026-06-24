@@ -1,8 +1,7 @@
 """Discord platform layer: a discord.py gateway client on the agnostic core.
 
 Mirrors ``slack_bot``: translates Discord events into the neutral
-`BoardService` ingestion calls and supplies the two hooks. Needs the optional
-``discord`` extra (``uv sync --extra discord``).
+`BoardService` ingestion calls and supplies the two hooks.
 """
 
 from __future__ import annotations

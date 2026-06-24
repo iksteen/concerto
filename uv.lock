@@ -255,14 +255,10 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "aiosqlite" },
+    { name = "discord-py" },
     { name = "fastapi" },
     { name = "python-dotenv" },
     { name = "uvicorn" },
-]
-
-[package.optional-dependencies]
-discord = [
-    { name = "discord-py" },
 ]
 
 [package.dev-dependencies]
@@ -275,12 +271,11 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.1" },
     { name = "aiosqlite", specifier = ">=0.21.0" },
-    { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.4" },
+    { name = "discord-py", specifier = ">=2.4" },
     { name = "fastapi", specifier = ">=0.118.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
     { name = "uvicorn", specifier = ">=0.37.0" },
 ]
-provides-extras = ["discord"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -9,8 +9,7 @@ logger = logging.getLogger("concerto")
 
 
 def _create_app() -> FastAPI:
-    # Import the selected platform lazily so a Slack deploy needn't install the
-    # optional `discord` extra (and vice versa).
+    # Import only the selected platform's module; the other isn't loaded.
     platform = os.getenv("CONCERTO_PLATFORM", "slack").strip().lower()
     if platform == "discord":
         from concerto.discord_bot import create_app  # noqa: PLC0415
