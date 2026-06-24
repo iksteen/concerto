@@ -15,7 +15,7 @@ ticket/interest counts. Runs against **Slack** or **Discord** (select with
 - `:question:` (or `:grey_question:` / `:eyes:`): user is interested, no ticket yet
 - `:pray:`: user is trying to get a sold-out ticket via TicketSwap
 - Run `/concerto rebuild` in a channel to fully rescan that channel's history
-- Tracked data is stored in SQLite only; the bot does not post or pin any messages
+- Tracked data is stored in SQLite only; the bot never posts messages (on Discord it acknowledges `track`/`untrack`/`rebuild` commands by reacting to them)
 
 The bot connects to Slack over **Socket Mode** (an outbound WebSocket), so no
 public callback URL is required. An HTTP server still runs alongside it (serving
@@ -99,8 +99,18 @@ docker compose up -d --build
   token into `DISCORD_BOT_TOKEN`
 - Under **Privileged Gateway Intents**, enable **Message Content Intent** (the
   bot needs message text to find links)
-- Invite the bot with the `bot` scope and the `Read Message History` +
-  `Add Reactions` / `Read Messages` permissions
-- There is no slash command; send `!concerto rebuild` (or your
-  `CONCERTO_DISCORD_COMMAND`) in a channel to rescan its history. Unlike Slack
-  there is no automatic backfill when the bot joins — run the command once.
+- Invite the bot with the `bot` scope and these permissions: **View Channels**,
+  **Read Message History** (to read links/reactions and rescan history), and
+  **Add Reactions** (the bot acknowledges commands by reacting to them — it
+  never posts messages)
+- **Tracking is opt-in per channel.** The bot ignores every channel until you
+  send `!concerto track` in it; `!concerto untrack` stops tracking. Tracked
+  channels are stored in SQLite and survive restarts.
+- `track` automatically backfills links posted before the bot joined (a
+  background rebuild); `untrack` clears that channel's stored links.
+- Commands are acknowledged with a reaction on your command message: ✅ done,
+  ❌ refused (e.g. `rebuild` in an untracked channel); `track`/`rebuild` show ⏳
+  while scanning, swapped for ✅ when finished.
+- `!concerto rebuild` (or `rescan`) re-scans a tracked channel's history on demand.
+- Customise the command prefix with `CONCERTO_DISCORD_COMMAND` (default
+  `!concerto`).
