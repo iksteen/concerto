@@ -19,12 +19,22 @@ from concerto.board import (
     BoardRepository,
     BoardService,
     register_board_routes,
+    request_shutdown,
 )
 from concerto.discord_bot import DiscordBotService
 from concerto.slack_bot import SlackBotService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from types import FrameType
+
+
+class _Server(uvicorn.Server):
+    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+        # Let open SSE streams finish so the graceful drain doesn't hang.
+        request_shutdown()
+        super().handle_exit(sig, frame)
+
 
 logger = logging.getLogger("concerto")
 
@@ -170,7 +180,7 @@ def main() -> None:
 
     host = str(server.get("host") or os.getenv("HOST", "127.0.0.1"))
     port = int(str(server.get("port") or os.getenv("PORT", "8000")))
-    uvicorn.run(_create_app(config), host=host, port=port)
+    _Server(uvicorn.Config(_create_app(config), host=host, port=port)).run()
 
 
 if __name__ == "__main__":

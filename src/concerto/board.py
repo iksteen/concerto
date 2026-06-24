@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from concerto import concert_scraper
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 
     import aiosqlite
 
@@ -33,6 +33,17 @@ WEB_API_TIMEOUT_SECONDS = 20
 SSE_KEEPALIVE_SECONDS = 15
 DAYS_PER_WEEK = 7
 DAYS_PER_MONTH = 31
+
+# Set when the process is shutting down so open SSE streams stop their otherwise
+# endless keepalive loop — otherwise uvicorn's graceful drain waits forever for
+# them and Ctrl-C appears to hang.
+_shutdown_requested = asyncio.Event()
+
+
+def request_shutdown() -> None:
+    """Signal open SSE streams to finish (called from the signal handler)."""
+    _shutdown_requested.set()
+
 
 # Reaction names that map to each status. These are platform-neutral shortcodes;
 # a platform whose reactions use other names must translate to these.
@@ -633,21 +644,39 @@ def register_board_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=404, detail="unknown channel")
 
         queue = service.subscribe(channel_id)
+        return StreamingResponse(
+            _sse_stream(service, channel_id, queue),
+            media_type="text/event-stream",
+        )
 
-        async def stream() -> AsyncIterator[str]:
+
+async def _sse_stream(
+    service: BoardService,
+    channel_id: str,
+    queue: asyncio.Queue[None],
+    *,
+    shutdown: asyncio.Event = _shutdown_requested,
+) -> AsyncGenerator[str, None]:
+    try:
+        while True:
+            update = asyncio.ensure_future(queue.get())
+            stop = asyncio.ensure_future(shutdown.wait())
             try:
-                while True:
-                    try:
-                        await asyncio.wait_for(
-                            queue.get(), timeout=SSE_KEEPALIVE_SECONDS
-                        )
-                        yield "data: update\n\n"
-                    except TimeoutError:
-                        yield ": keepalive\n\n"
+                done, _ = await asyncio.wait(
+                    {update, stop},
+                    timeout=SSE_KEEPALIVE_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
             finally:
-                service.unsubscribe(channel_id, queue)
-
-        return StreamingResponse(stream(), media_type="text/event-stream")
+                # A pending get() leaves its queued item in place for the next
+                # iteration; cancelling a finished task is a harmless no-op.
+                update.cancel()
+                stop.cancel()
+            if stop in done:
+                break
+            yield "data: update\n\n" if update in done else ": keepalive\n\n"
+    finally:
+        service.unsubscribe(channel_id, queue)
 
 
 def _service_from_request(request: Request, connector: str) -> BoardService:
