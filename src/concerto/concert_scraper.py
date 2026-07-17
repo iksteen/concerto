@@ -481,6 +481,43 @@ def parse_p60(html: str, url: str) -> ConcertInfo:
     return info
 
 
+def _ekko_date(text: str) -> tuple[dt.date | None, str | None]:
+    """Parse an Ekko date card ("za 5 sep", "ma 25 jan 27").
+
+    Ekko prints a 2-digit year only when it differs from the current one; a
+    yearless card ("za 5 sep") means the current year.
+    """
+    match = re.search(r"(\d{1,2})\s+([A-Za-z]+)(?:\s+(\d{2,4}))?", text)
+    if not match:
+        return None, None
+    month = _MONTHS.get(match[2].lower())
+    if month is None:
+        return None, None
+    if match[3]:
+        year = int(match[3])
+        if year < _YEAR_CUTOFF:
+            year += _CENTURY
+    else:
+        year = dt.datetime.now(tz=dt.UTC).year
+    return _safe_date(year, month, int(match[1])), text.strip()
+
+
+def parse_ekko(html: str, url: str) -> ConcertInfo:
+    info = ConcertInfo(url=url, venue="EKKO")
+    title = _meta_content(html, "og:title") or _title(html) or ""
+    # "<band> - EKKO" with an em-dash, en-dash, or hyphen separator.
+    band = _strip_status_prefix(
+        re.sub(r"\s*[\u2014\u2013-]\s*EKKO\s*$", "", title).strip()
+    )
+    if band:
+        info.band = band
+    # The date card reads "za 5 sep", or "ma 25 jan 27" for other years.
+    card = re.search(r"Datum</div>\s*<div[^>]*>\s*([^<]+?)\s*</div>", html)
+    if card:
+        info.date, info.raw_date = _ekko_date(card[1])
+    return info
+
+
 def parse_patronaat(html: str, url: str) -> ConcertInfo:
     info = ConcertInfo(url=url, venue="Patronaat")
     match = re.search(
@@ -511,6 +548,7 @@ PARSERS: dict[str, Callable[[str, str], ConcertInfo]] = {
     "013.nl": _json_ld_with_venue("013"),
     "musicon.nl": _json_ld_with_venue("Musicon"),
     "effenaar.nl": _json_ld_with_venue("Effenaar"),
+    "ekko.nl": parse_ekko,
     "patronaat.nl": parse_patronaat,
     "p60.nl": parse_p60,
     "nobel.nl": _meta_parser("Nobel"),
