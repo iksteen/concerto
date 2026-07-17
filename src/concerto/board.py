@@ -95,7 +95,7 @@ class ChannelBoard:
 class Origin:
     """One channel that tracks an event: its message link and interest counts."""
 
-    label: str  # the connector name the event came from
+    label: str  # e.g. "main · #gigs" or "My Server · #gigs" — origin of the event
     message_url: str | None
     going: int  # have a ticket
     undecided: int  # interested, no ticket yet
@@ -321,12 +321,13 @@ class BoardService:
         return None
 
     def _origin_label(self, channel_id: str) -> str:
+        prefix = self._origin_prefix(channel_id)
         name = self._channel_names.get(channel_id)
-        return (
-            f"{self._connector_id} \N{MIDDLE DOT} {name}"
-            if name
-            else self._connector_id
-        )
+        return f"{prefix} \N{MIDDLE DOT} {name}" if name else prefix
+
+    def _origin_prefix(self, channel_id: str) -> str:  # noqa: ARG002
+        """Label shown before the channel name; overridable per connector."""
+        return self._connector_id
 
     # --- platform hooks (overridden by subclasses) ---
 

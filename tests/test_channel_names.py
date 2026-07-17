@@ -24,6 +24,36 @@ class _RenamingSvc(_Svc):
         return "#renamed"
 
 
+class _ServerSvc(_Svc):
+    """A connector that labels origins with a server name (like Discord)."""
+
+    def _origin_prefix(self, channel_id: str) -> str:  # noqa: ARG002
+        return "My Server"
+
+
+async def _run_prefix() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "t.db")
+        db = await aiosqlite.connect(path)
+        try:
+            repo = BoardRepository(db)
+            await repo.init()
+            async with aiohttp.ClientSession() as session:
+                svc = _ServerSvc("discord", session, repo)
+                await svc.replace_board(
+                    "42", {"https://x/1": LinkEntry(going=1, band="A")}
+                )
+                await svc.set_channel_name("42", "#general")
+                views = await svc.event_views("42")
+                assert views[0].origins[0].label == "My Server · #general"
+        finally:
+            await db.close()
+
+
+def test_origin_prefix_replaces_connector_in_label() -> None:
+    asyncio.run(_run_prefix())
+
+
 async def _run() -> None:
     dbs: list[aiosqlite.Connection] = []
 

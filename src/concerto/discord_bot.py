@@ -104,6 +104,16 @@ class DiscordBotService(BoardService):
             return None
         return _channel_name(self._client.get_channel(int(channel_id)))
 
+    def _origin_prefix(self, channel_id: str) -> str:
+        # Show the Discord server (guild) name rather than the connector name.
+        if channel_id.isdigit():
+            channel = self._client.get_channel(int(channel_id))
+            guild = getattr(channel, "guild", None)
+            name = getattr(guild, "name", None)
+            if isinstance(name, str) and name:
+                return name
+        return self._connector_id
+
     # --- gateway lifecycle ---
 
     async def setup(self) -> None:
