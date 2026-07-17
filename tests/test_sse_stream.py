@@ -19,7 +19,8 @@ async def _run_shutdown() -> None:
     service = MagicMock(spec=BoardService)
 
     chunks = [
-        chunk async for chunk in _sse_stream(service, "C1", queue, shutdown=shutdown)
+        chunk
+        async for chunk in _sse_stream([(service, "C1", queue)], shutdown=shutdown)
     ]
 
     # No keepalive/update emitted; it broke out immediately and cleaned up.
@@ -37,7 +38,7 @@ async def _run_update() -> None:
     queue.put_nowait(None)  # a pending board update
     service = MagicMock(spec=BoardService)
 
-    stream = _sse_stream(service, "C1", queue, shutdown=shutdown)
+    stream = _sse_stream([(service, "C1", queue)], shutdown=shutdown)
     chunk = await stream.__anext__()
     assert chunk == "data: update\n\n"
     await stream.aclose()

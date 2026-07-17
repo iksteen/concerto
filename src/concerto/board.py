@@ -11,7 +11,7 @@ import asyncio
 import datetime as dt
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from html import escape
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -92,6 +92,17 @@ class ChannelBoard:
 
 
 @dataclass
+class Origin:
+    """One channel that tracks an event: its message link and interest counts."""
+
+    label: str  # the connector name the event came from
+    message_url: str | None
+    going: int  # have a ticket
+    undecided: int  # interested, no ticket yet
+    looking: int  # looking for a ticket on TicketSwap
+
+
+@dataclass
 class EventView:
     """An immutable snapshot of a tracked link for the overview page."""
 
@@ -99,12 +110,10 @@ class EventView:
     band: str | None
     venue: str | None
     expired: bool
-    message_url: str | None
     date: dt.date | None
     end_date: dt.date | None  # end of a multi-day run, else None
-    going: int  # have a ticket
-    undecided: int  # interested, no ticket yet
-    looking: int  # looking for a ticket on TicketSwap
+    # One entry per channel tracking this event; combined boards have several.
+    origins: list[Origin]
 
 
 class BoardRepository:
@@ -270,12 +279,19 @@ class BoardService:
                     band=entry.band,
                     venue=entry.venue,
                     expired=entry.expired,
-                    message_url=self.message_url(channel_id, entry.source_message_ts),
                     date=_parse_iso_date(entry.event_date),
                     end_date=_parse_iso_date(entry.event_end_date),
-                    going=entry.going,
-                    undecided=entry.undecided,
-                    looking=entry.looking,
+                    origins=[
+                        Origin(
+                            label=self._connector_id,
+                            message_url=self.message_url(
+                                channel_id, entry.source_message_ts
+                            ),
+                            going=entry.going,
+                            undecided=entry.undecided,
+                            looking=entry.looking,
+                        )
+                    ],
                 )
                 for url, entry in board.links.items()
             ]
@@ -636,50 +652,125 @@ def register_board_routes(app: FastAPI) -> None:
         if not service.is_supported_channel(channel_id):
             raise HTTPException(status_code=404, detail="unknown channel")
 
-        queue = service.subscribe(channel_id)
         return StreamingResponse(
-            _sse_stream(service, channel_id, queue),
+            _sse_stream([(service, channel_id, service.subscribe(channel_id))]),
             media_type="text/event-stream",
         )
 
+    @app.get("/combined/{name}", response_class=HTMLResponse)
+    async def combined(name: str, request: Request) -> str:
+        sources = _combined_from_request(request, name)
+        services = _services_from_request(request)
+        views = await _combined_event_views(services, sources)
+        return render_overview(name, views)
+
+    @app.get("/combined/{name}/events")
+    async def combined_events(name: str, request: Request) -> StreamingResponse:
+        sources = _combined_from_request(request, name)
+        services = _services_from_request(request)
+        subs = [
+            (service, channel, service.subscribe(channel))
+            for connector, channel in sources
+            if (service := services.get(connector)) is not None
+        ]
+        return StreamingResponse(_sse_stream(subs), media_type="text/event-stream")
+
+
+Subscription = tuple["BoardService", str, "asyncio.Queue[None]"]
+
 
 async def _sse_stream(
-    service: BoardService,
-    channel_id: str,
-    queue: asyncio.Queue[None],
+    subscriptions: list[Subscription],
     *,
     shutdown: asyncio.Event = _shutdown_requested,
 ) -> AsyncGenerator[str, None]:
+    """Emit an SSE ``update`` whenever any subscribed board changes."""
     try:
         while True:
-            update = asyncio.ensure_future(queue.get())
+            getters = [
+                asyncio.ensure_future(queue.get()) for _, _, queue in subscriptions
+            ]
             stop = asyncio.ensure_future(shutdown.wait())
             try:
                 done, _ = await asyncio.wait(
-                    {update, stop},
+                    {*getters, stop},
                     timeout=SSE_KEEPALIVE_SECONDS,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
             finally:
                 # A pending get() leaves its queued item in place for the next
                 # iteration; cancelling a finished task is a harmless no-op.
-                update.cancel()
+                for getter in getters:
+                    getter.cancel()
                 stop.cancel()
             if stop in done:
                 break
-            yield "data: update\n\n" if update in done else ": keepalive\n\n"
+            yield (
+                "data: update\n\n"
+                if any(g in done for g in getters)
+                else ": keepalive\n\n"
+            )
     finally:
-        service.unsubscribe(channel_id, queue)
+        for service, channel, queue in subscriptions:
+            service.unsubscribe(channel, queue)
 
 
-def _service_from_request(request: Request, connector: str) -> BoardService:
+def _services_from_request(request: Request) -> dict[str, BoardService]:
     services = getattr(request.state, "services", None)
     if not isinstance(services, dict):
         raise HTTPException(status_code=500, detail="services not initialized")
-    service = services.get(connector)
+    return services
+
+
+def _service_from_request(request: Request, connector: str) -> BoardService:
+    service = _services_from_request(request).get(connector)
     if not isinstance(service, BoardService):
         raise HTTPException(status_code=404, detail="unknown connector")
     return service
+
+
+def _combined_from_request(request: Request, name: str) -> list[tuple[str, str]]:
+    combined = getattr(request.state, "combined", None)
+    if not isinstance(combined, dict):
+        raise HTTPException(status_code=500, detail="combined boards not initialized")
+    sources: list[tuple[str, str]] | None = combined.get(name)
+    if sources is None:
+        raise HTTPException(status_code=404, detail="unknown board")
+    return sources
+
+
+async def _combined_event_views(
+    services: dict[str, BoardService], sources: list[tuple[str, str]]
+) -> list[EventView]:
+    collected: list[EventView] = []
+    for connector, channel in sources:
+        service = services.get(connector)
+        if service is not None:
+            collected.extend(await service.event_views(channel))
+    return merge_event_views(collected)
+
+
+def merge_event_views(views: list[EventView]) -> list[EventView]:
+    """Fold views from several boards into one list, deduped by URL.
+
+    The same event tracked in multiple channels is shown once: metadata is taken
+    from the first board that resolved it, and it's only treated as expired when
+    every board agrees. Each channel keeps its own origin row (message link plus
+    that channel's interest counts) rather than being summed away.
+    """
+    merged: dict[str, EventView] = {}
+    for view in views:
+        existing = merged.get(view.url)
+        if existing is None:
+            merged[view.url] = replace(view, origins=list(view.origins))
+            continue
+        existing.band = existing.band or view.band
+        existing.venue = existing.venue or view.venue
+        existing.date = existing.date or view.date
+        existing.end_date = existing.end_date or view.end_date
+        existing.expired = existing.expired and view.expired
+        existing.origins.extend(view.origins)
+    return list(merged.values())
 
 
 _OVERVIEW_CSS = """
@@ -721,15 +812,21 @@ main { max-width: 760px; margin: 0 auto; padding: 24px 16px 72px; }
 .date .moy { font-size: 0.68rem; color: var(--muted); }
 .date.tba .dom { font-size: 0.95rem; color: var(--accent); padding: 6px 0; }
 .meta { flex: 1 1 auto; min-width: 0; }
-.band { font-size: 1.14rem; font-weight: 650; word-break: break-word; }
+.band {
+  display: inline-block; font-size: 1.14rem; font-weight: 650;
+  word-break: break-word; text-decoration: none; color: var(--text);
+}
+.band:hover { color: var(--accent); }
 .venue { color: var(--muted); font-size: 0.92rem; margin: 2px 0 9px; }
 .run { color: var(--accent); font-size: 0.82rem; margin: -4px 0 9px; }
-.status { display: flex; gap: 12px; margin: 0 0 9px; }
+.origins { display: flex; flex-direction: column; gap: 7px; }
+.origin { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.status { display: flex; gap: 12px; }
 .stat {
   font-size: 0.92rem; font-variant-numeric: tabular-nums;
   cursor: default; user-select: none;
 }
-.links { display: flex; gap: 8px; flex-wrap: wrap; }
+.origin-name { font-size: 0.8rem; color: var(--muted); }
 .link {
   font-size: 0.8rem; text-decoration: none; color: var(--text);
   background: #0f131b; border: 1px solid var(--line);
@@ -756,12 +853,12 @@ def _render_date_badge(date: dt.date | None) -> str:
     )
 
 
-def _render_status(view: EventView) -> str:
+def _render_status(going: int, undecided: int, looking: int) -> str:
     # (emoji, count, hover label); zero-count statuses are omitted.
     stats = [
-        ("\N{TICKET}", view.going, "have a ticket"),
-        ("\N{EYES}", view.undecided, "interested"),
-        ("\N{PERSON WITH FOLDED HANDS}", view.looking, "looking for a ticket"),
+        ("\N{TICKET}", going, "have a ticket"),
+        ("\N{EYES}", undecided, "interested"),
+        ("\N{PERSON WITH FOLDED HANDS}", looking, "looking for a ticket"),
     ]
     pills = [
         f'<span class="stat" title="{label}">{emoji} {count}</span>'
@@ -787,27 +884,35 @@ def _render_run(view: EventView) -> str:
     return f'<div class="run">through {end:%-d %b %Y}</div>'
 
 
+def _render_origin(origin: Origin) -> str:
+    label = escape(origin.label)
+    if origin.message_url:
+        head = (
+            f'<a class="link" href="{escape(origin.message_url)}" '
+            f'target="_blank" rel="noopener">{label} &#8599;</a>'
+        )
+    else:
+        head = f'<span class="origin-name">{label}</span>'
+    pills = _render_status(origin.going, origin.undecided, origin.looking)
+    return f'<div class="origin">{head}{pills}</div>'
+
+
 def _render_event_card(view: EventView) -> str:
     name = escape(view.band) if view.band else _fallback_name(view.url)
     venue = escape(view.venue) if view.venue else "&mdash;"
-    links = [
-        f'<a class="link" href="{escape(view.url)}" '
-        'target="_blank" rel="noopener">Event &#8599;</a>'
-    ]
-    if view.message_url:
-        links.append(
-            f'<a class="link" href="{escape(view.message_url)}" '
-            'target="_blank" rel="noopener">Open &#8599;</a>'
-        )
+    title = (
+        f'<a class="band" href="{escape(view.url)}" '
+        f'target="_blank" rel="noopener">{name} &#8599;</a>'
+    )
+    origins = "".join(_render_origin(origin) for origin in view.origins)
     return (
         '<article class="card">'
         f"{_render_date_badge(view.date)}"
         '<div class="meta">'
-        f'<div class="band">{name}</div>'
+        f"{title}"
         f'<div class="venue">{venue}</div>'
         f"{_render_run(view)}"
-        f"{_render_status(view)}"
-        f'<div class="links">{" ".join(links)}</div>'
+        f'<div class="origins">{origins}</div>'
         "</div>"
         "</article>"
     )

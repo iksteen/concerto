@@ -32,3 +32,10 @@ type = "discord"
 name = "main"
 token = "..."                    # bot token from the developer portal
 command = "!concerto"            # optional, text-command prefix (default !concerto)
+
+# Optional combined boards: merge several channels (across connectors) into one
+# page served at /combined/<name>. Each source is "connector/channel"; the same
+# event tracked in multiple channels is shown once with interest counts summed.
+[[combined]]
+name = "all"
+sources = ["work/C0123456789", "club/C0987654321", "main/456789012345678901"]

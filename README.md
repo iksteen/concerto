@@ -56,6 +56,10 @@ token = "..."            # bot token from the developer portal
   the same channel id never collide.
 - Optional per-connector `command` overrides the default (`/concerto` for Slack,
   `!concerto` for Discord).
+- Optional `[[combined]]` boards merge several channels (across connectors) into
+  one page at `/combined/<name>`. Each entry needs a unique `name` (no `/`) and a
+  `sources` list of `"connector/channel"` strings. The same event tracked in
+  multiple channels is shown once, with interest counts summed.
 - An optional `[server]` table sets `db_path`, `host`, `port`, `log_level`.
 
 The process finds its config at `CONCERTO_CONFIG` (default `./concerto.toml`).

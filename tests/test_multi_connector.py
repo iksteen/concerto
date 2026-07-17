@@ -54,10 +54,10 @@ async def _run_namespacing() -> None:
                     await db.close()
 
     assert [v.url for v in va] == ["https://x/1"], va
-    assert va[0].going == 2
+    assert va[0].origins[0].going == 2
     assert va[0].band == "A"
     assert [v.url for v in vb] == ["https://x/2"], vb
-    assert vb[0].going == 5
+    assert vb[0].origins[0].going == 5
     assert vb[0].band == "B"
 
 

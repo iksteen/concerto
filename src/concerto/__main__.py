@@ -93,6 +93,55 @@ def _validate_connectors(config: dict[str, Any]) -> list[dict[str, Any]]:
     return connectors
 
 
+def _validate_combined(
+    config: dict[str, Any], connector_names: set[str]
+) -> dict[str, list[tuple[str, str]]]:
+    """Parse optional [[combined]] boards that merge several channels into one.
+
+    Each source is a "connector/channel" string referencing a defined connector;
+    the board is served at /combined/<name>.
+    """
+    boards = config.get("combined")
+    if boards is None:
+        return {}
+    if not isinstance(boards, list):
+        msg = "[[combined]] must be an array of tables"
+        raise RuntimeError(msg)  # noqa: TRY004
+
+    result: dict[str, list[tuple[str, str]]] = {}
+    for spec in boards:
+        if not isinstance(spec, dict):
+            msg = "Each [[combined]] must be a table"
+            raise RuntimeError(msg)  # noqa: TRY004
+        name = spec.get("name")
+        if not isinstance(name, str) or not name or "/" in name:
+            msg = f"Each combined board needs a non-empty 'name' without '/': {name!r}"
+            raise RuntimeError(msg)
+        if name in result:
+            msg = f"Duplicate combined board name: {name!r}"
+            raise RuntimeError(msg)
+        raw = spec.get("sources")
+        if not isinstance(raw, list) or not raw:
+            msg = f"Combined board {name!r} needs a non-empty 'sources' list"
+            raise RuntimeError(msg)
+        sources: list[tuple[str, str]] = []
+        for source in raw:
+            if (
+                not isinstance(source, str)
+                or source.count("/") != 1
+                or "" in source.split("/")
+            ):
+                msg = f"Combined board {name!r} source must be 'connector/channel': {source!r}"
+                raise RuntimeError(msg)
+            connector, channel = source.split("/")
+            if connector not in connector_names:
+                msg = f"Combined board {name!r} references unknown connector {connector!r}"
+                raise RuntimeError(msg)
+            sources.append((connector, channel))
+        result[name] = list(dict.fromkeys(sources))
+    return result
+
+
 async def _build_connector(
     spec: dict[str, Any],
     session: aiohttp.ClientSession,
@@ -126,6 +175,7 @@ async def _build_connector(
 
 def _create_app(config: dict[str, Any]) -> FastAPI:
     connectors = _validate_connectors(config)
+    combined = _validate_combined(config, {str(spec["name"]) for spec in connectors})
     server = config.get("server") or {}
     db_path = str(
         server.get("db_path") or os.getenv("CONCERTO_DB_PATH", DEFAULT_DB_PATH)
@@ -155,7 +205,7 @@ def _create_app(config: dict[str, Any]) -> FastAPI:
                 )
                 tasks.append(asyncio.create_task(service.run()))
             try:
-                yield {"services": services}
+                yield {"services": services, "combined": combined}
             finally:
                 for service in services.values():
                     with contextlib.suppress(Exception):
