@@ -518,6 +518,34 @@ def parse_ekko(html: str, url: str) -> ConcertInfo:
     return info
 
 
+# "30 juli - 2 augustus 2026": a multi-day festival whose two dates share one
+# trailing year, so parse_date alone would only see the end date.
+_CASTLEFEST_DATES = re.compile(
+    r"(\d{1,2})\s+([A-Za-z]+)\s*(?:t/m|tot|[-\u2013\u2014])\s*"
+    r"(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})",
+    re.IGNORECASE,
+)
+
+
+def parse_castlefest(html: str, url: str) -> ConcertInfo:
+    info = ConcertInfo(url=url, venue="Keukenhof, Lisse")
+    title = _meta_content(html, "og:title") or _title(html) or ""
+    info.band = title.split("|")[0].strip() or None
+    match = _CASTLEFEST_DATES.search(_strip_tags(html))
+    if match:
+        year = int(match[5])
+        start_month = _MONTHS.get(match[2].lower())
+        end_month = _MONTHS.get(match[4].lower())
+        if start_month:
+            info.date = _safe_date(year, start_month, int(match[1]))
+            info.raw_date = match[0]
+        if end_month:
+            end = _safe_date(year, end_month, int(match[3]))
+            if end and (info.date is None or end > info.date):
+                info.end_date = end
+    return info
+
+
 def parse_patronaat(html: str, url: str) -> ConcertInfo:
     info = ConcertInfo(url=url, venue="Patronaat")
     match = re.search(
@@ -549,6 +577,7 @@ PARSERS: dict[str, Callable[[str, str], ConcertInfo]] = {
     "musicon.nl": _json_ld_with_venue("Musicon"),
     "effenaar.nl": _json_ld_with_venue("Effenaar"),
     "ekko.nl": parse_ekko,
+    "castlefest.nl": parse_castlefest,
     "patronaat.nl": parse_patronaat,
     "p60.nl": parse_p60,
     "nobel.nl": _meta_parser("Nobel"),
