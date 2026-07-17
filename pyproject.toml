@@ -30,9 +30,10 @@ requires = ["uv_build>=0.10.11,<0.11.0"]
 build-backend = "uv_build"
 
 [tool.ruff.lint.per-file-ignores]
-# Tests: asserts are the point, magic values in assertions are fine, and the
-# test package needs no __init__.
-"tests/**" = ["S101", "INP001", "PLR2004"]
+# Tests: asserts are the point, magic values in assertions are fine, the test
+# package needs no __init__, dummy tokens aren't secrets, and poking a service's
+# internals to pin down behaviour is expected.
+"tests/**" = ["S101", "INP001", "PLR2004", "S106", "SLF001"]
 
 [tool.ruff.lint]
 select = ["ALL"]

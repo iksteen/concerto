@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 from concerto.discord_bot import DiscordBotService, _guild_of
 
 
-def _service() -> DiscordBotService:
+def _service() -> tuple[DiscordBotService, MagicMock]:
     svc = DiscordBotService(
         name="mydiscord",
         token="x",
@@ -16,9 +16,10 @@ def _service() -> DiscordBotService:
         db=MagicMock(),
     )
     # A live gateway lookup while rendering is exactly what we're avoiding.
-    svc._client = MagicMock()
-    svc._client.get_channel.side_effect = AssertionError("live lookup at render")
-    return svc
+    client = MagicMock()
+    client.get_channel.side_effect = AssertionError("live lookup at render")
+    svc._client = client
+    return svc, client
 
 
 def test_guild_of_extracts_id_and_name() -> None:
@@ -33,7 +34,7 @@ def test_guild_of_extracts_id_and_name() -> None:
 
 
 def test_render_path_uses_cache_not_gateway() -> None:
-    svc = _service()
+    svc, client = _service()
     svc._guild_ids["42"] = "999"
     svc._guild_names["42"] = "My Server"
 
@@ -44,4 +45,4 @@ def test_render_path_uses_cache_not_gateway() -> None:
     # Uncached channel: fall back, still no gateway call.
     assert svc.message_url("77", "1700000000") is None
     assert svc._origin_prefix("77") == "mydiscord"
-    assert not svc._client.get_channel.called
+    assert not client.get_channel.called
