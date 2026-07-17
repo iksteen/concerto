@@ -175,7 +175,9 @@ class SlackBotService(BoardService):
 
     async def fetch_channel_name(self, channel_id: str) -> str | None:
         try:
-            info = await self._api_call("conversations.info", {"channel": channel_id})
+            info = await self._api_call(
+                "conversations.info", {"channel": channel_id}, as_form=True
+            )
         except SlackApiError as exc:
             # Usually a missing scope (conversations.info needs channels:read /
             # groups:read); log it so a blank channel label is diagnosable.
@@ -245,17 +247,26 @@ class SlackBotService(BoardService):
         return links_data
 
     async def _api_call(
-        self, method: str, payload: dict[str, Any], *, token: str | None = None
+        self,
+        method: str,
+        payload: dict[str, Any],
+        *,
+        token: str | None = None,
+        as_form: bool = False,
     ) -> dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {token or self._bot_token}",
-            "Content-Type": "application/json; charset=utf-8",
-        }
+        headers = {"Authorization": f"Bearer {token or self._bot_token}"}
+        # Slack's read methods (e.g. conversations.info) ignore a JSON body and
+        # reply invalid_arguments; they need form-encoded args (a dict, which
+        # aiohttp form-encodes). Write methods keep the JSON body.
+        data: Any = payload
+        if not as_form:
+            headers["Content-Type"] = "application/json; charset=utf-8"
+            data = json.dumps(payload)
 
         async with self._session.post(
             f"{SLACK_API_BASE}/{method}",
             headers=headers,
-            data=json.dumps(payload),
+            data=data,
         ) as response:
             body = await response.json(content_type=None)
 
