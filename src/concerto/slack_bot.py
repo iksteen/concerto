@@ -176,7 +176,10 @@ class SlackBotService(BoardService):
     async def fetch_channel_name(self, channel_id: str) -> str | None:
         try:
             info = await self._api_call("conversations.info", {"channel": channel_id})
-        except SlackApiError:
+        except SlackApiError as exc:
+            # Usually a missing scope (conversations.info needs channels:read /
+            # groups:read); log it so a blank channel label is diagnosable.
+            logger.warning("Could not fetch name for channel %s: %s", channel_id, exc)
             return None
         channel = info.get("channel")
         name = channel.get("name") if isinstance(channel, dict) else None
