@@ -1016,6 +1016,7 @@ def render_overview(channel_id: str, views: list[EventView]) -> str:
 
     week: list[EventView] = []
     month: list[EventView] = []
+    year: list[EventView] = []
     later: list[EventView] = []
     for view in dated:
         if view.date is None:
@@ -1025,6 +1026,8 @@ def render_overview(channel_id: str, views: list[EventView]) -> str:
             week.append(view)
         elif days < DAYS_PER_MONTH:
             month.append(view)
+        elif view.date.year == today.year:
+            year.append(view)
         else:
             later.append(view)
 
@@ -1032,6 +1035,7 @@ def render_overview(channel_id: str, views: list[EventView]) -> str:
         ("Date unknown", undated),
         ("This week", week),
         ("This month", month),
+        ("This year", year),
         ("Upcoming", later),
     ]
     sections = "".join(
