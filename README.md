@@ -73,6 +73,8 @@ incoming events and scrape results). `.env` is still loaded at startup.
   reaction counts only — the bot never stores who posted or reacted.
 - Rows are keyed by `connector/channel_id`, so all connectors share one database
   file safely.
+- Channel display names are tracked (from ingested messages/reactions/rebuilds)
+  so each origin row on a combined board shows `connector · #channel`.
 - Default database path is `./concerto.db` (override via `[server].db_path` or
   `CONCERTO_DB_PATH`).
 
@@ -116,7 +118,7 @@ Do this once per Slack workspace connector:
   require. For reference, the resulting set is:
   - `channels:history`, `groups:history` — from `message.channels` / `message.groups`
   - `channels:read`, `groups:read` — from `member_joined_channel`, used to scan a
-    channel's existing links and reaction emoji when the bot is invited
+    channel's existing links when the bot is invited and to read channel names
   - `reactions:read` — from `reaction_added` / `reaction_removed`
   - `commands` — from the `/concerto` slash command
 - Install the app to your workspace and invite it to channels you want to track.

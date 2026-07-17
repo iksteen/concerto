@@ -15,18 +15,25 @@ def _origin(label: str, url: str | None = None, **counts: int) -> Origin:
     return Origin(label=label, message_url=url, **base)
 
 
-def _view(url: str, origins: list[Origin] | None = None, **kw: Any) -> EventView:
-    base: dict[str, Any] = {
-        "url": url,
-        "band": None,
-        "venue": None,
-        "expired": False,
-        "date": None,
-        "end_date": None,
-        "origins": list(origins or []),
-    }
-    base.update(kw)
-    return EventView(**base)
+def _view(
+    url: str,
+    origins: list[Origin] | None = None,
+    *,
+    band: str | None = None,
+    venue: str | None = None,
+    expired: bool = False,
+    date: dt.date | None = None,
+    end_date: dt.date | None = None,
+) -> EventView:
+    return EventView(
+        url=url,
+        band=band,
+        venue=venue,
+        expired=expired,
+        date=date,
+        end_date=end_date,
+        origins=list(origins or []),
+    )
 
 
 def test_duplicate_url_keeps_per_origin_rows_and_coalesces_metadata() -> None:

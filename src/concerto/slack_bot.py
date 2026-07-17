@@ -73,6 +73,8 @@ class SlackBotService(BoardService):
             raise SlackApiError(msg)
         self._bot_user_id = user_id
         self._workspace_url = _normalize_workspace_url(auth_info.get("url"))
+        await self.load_channel_names()
+        await self.refresh_channel_names()
 
     # --- core hooks ---
 
@@ -108,6 +110,7 @@ class SlackBotService(BoardService):
         channel_id = str(event.get("channel", ""))
         if not self.is_supported_channel(channel_id):
             return
+        await self._ensure_channel_name(channel_id)
         await self.apply_message(
             channel_id, event.get("ts"), str(event.get("text", ""))
         )
@@ -120,6 +123,7 @@ class SlackBotService(BoardService):
         channel_id = str(event.get("channel", ""))
         if not self.is_supported_channel(channel_id):
             return
+        await self._ensure_channel_name(channel_id)
         entries = await self._collect_history_link_entries(channel_id)
         await self.merge_entries(channel_id, entries)
 
@@ -140,6 +144,7 @@ class SlackBotService(BoardService):
         message_ts = str(item.get("ts", ""))
         if not self.is_supported_channel(channel_id) or not message_ts:
             return
+        await self._ensure_channel_name(channel_id)
 
         # Re-parse the whole message's reactions rather than the single delta,
         # so we only ever keep aggregate counts and never store who reacted.
@@ -156,8 +161,26 @@ class SlackBotService(BoardService):
     async def handle_rebuild_command(self, channel_id: str) -> None:
         if not self.is_supported_channel(channel_id):
             return
+        await self._ensure_channel_name(channel_id)
         entries = await self._collect_history_link_entries(channel_id)
         await self.replace_board(channel_id, entries)
+
+    async def _ensure_channel_name(self, channel_id: str) -> None:
+        """Fetch and track a channel's name the first time we see it."""
+        if channel_id in self._channel_names:
+            return
+        await self.set_channel_name(
+            channel_id, await self.fetch_channel_name(channel_id)
+        )
+
+    async def fetch_channel_name(self, channel_id: str) -> str | None:
+        try:
+            info = await self._api_call("conversations.info", {"channel": channel_id})
+        except SlackApiError:
+            return None
+        channel = info.get("channel")
+        name = channel.get("name") if isinstance(channel, dict) else None
+        return f"#{name}" if isinstance(name, str) and name else None
 
     # --- Slack reads ---
 

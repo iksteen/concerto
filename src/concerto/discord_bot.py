@@ -99,6 +99,11 @@ class DiscordBotService(BoardService):
             f"https://discord.com/channels/{guild.id}/{channel_id}/{source_message_ts}"
         )
 
+    async def fetch_channel_name(self, channel_id: str) -> str | None:
+        if not channel_id.isdigit():
+            return None
+        return _channel_name(self._client.get_channel(int(channel_id)))
+
     # --- gateway lifecycle ---
 
     async def setup(self) -> None:
@@ -112,6 +117,7 @@ class DiscordBotService(BoardService):
             "SELECT channel_id FROM discord_tracked_channels"
         ) as cursor:
             self._tracked = {str(row[0]) async for row in cursor}
+        await self.load_channel_names()
 
     async def run(self) -> None:
         await self._client.start(self._token)
@@ -137,6 +143,8 @@ class DiscordBotService(BoardService):
         @client.event
         async def on_ready() -> None:
             logger.info("Connected to Discord as %s", client.user)
+            # Channels are cached now (unlike at setup()), so names resolve.
+            await self.refresh_channel_names()
 
         @client.event
         async def on_message(message: discord.Message) -> None:
@@ -178,6 +186,9 @@ class DiscordBotService(BoardService):
 
         if not self.is_supported_channel(str(message.channel.id)):
             return
+        await self.set_channel_name(
+            str(message.channel.id), _channel_name(message.channel)
+        )
         await self.apply_message(str(message.channel.id), message.id, message.content)
 
     def _match_command(self, content: str) -> str | None:
@@ -209,6 +220,7 @@ class DiscordBotService(BoardService):
 
         # Re-parse the whole message's reactions, never the single delta.
         reactions = await _normalize_reactions(message)
+        await self.set_channel_name(str(channel.id), _channel_name(channel))
         await self.apply_reactions(
             str(channel.id), message.id, message.content, reactions
         )
@@ -250,6 +262,7 @@ class DiscordBotService(BoardService):
             await message.add_reaction(_REFUSED)
             return
         await message.add_reaction(_WORKING)
+        await self.set_channel_name(str(channel.id), _channel_name(channel))
         entries: dict[str, LinkEntry] = {}
         async for historic in channel.history(limit=None):
             reactions = await _normalize_reactions(historic)
@@ -264,6 +277,11 @@ class DiscordBotService(BoardService):
             return
         with contextlib.suppress(discord.HTTPException):
             await message.remove_reaction(_WORKING, user)
+
+
+def _channel_name(channel: object) -> str | None:
+    name = getattr(channel, "name", None)
+    return f"#{name}" if isinstance(name, str) and name else None
 
 
 def _can_manage(message: discord.Message) -> bool:

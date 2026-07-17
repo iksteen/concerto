@@ -140,6 +140,13 @@ class BoardRepository:
                 PRIMARY KEY (channel_id, url)
             );
 
+            -- Human channel names for origin labels, keyed by the same
+            -- connector/channel_id namespace as `links`.
+            CREATE TABLE IF NOT EXISTS channel_names (
+                channel_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+
             -- We no longer store who posted or reacted, only aggregate counts
             -- on `links`. Run a channel rebuild to repopulate the counts.
             DROP TABLE IF EXISTS link_statuses;
@@ -217,6 +224,25 @@ class BoardRepository:
 
         await self._db.commit()
 
+    async def load_channel_names(self) -> dict[str, str]:
+        async with self._db.execute(
+            "SELECT channel_id, name FROM channel_names"
+        ) as cursor:
+            return {str(row[0]): str(row[1]) async for row in cursor}
+
+    async def load_channel_ids(self) -> set[str]:
+        """Namespaced ids of every channel that has a board (i.e. tracked links)."""
+        async with self._db.execute("SELECT DISTINCT channel_id FROM links") as cursor:
+            return {str(row[0]) async for row in cursor}
+
+    async def save_channel_name(self, key: str, name: str) -> None:
+        await self._db.execute(
+            "INSERT INTO channel_names(channel_id, name) VALUES(?, ?) "
+            "ON CONFLICT(channel_id) DO UPDATE SET name = excluded.name",
+            (key, name),
+        )
+        await self._db.commit()
+
 
 class BoardService:
     """Owns the board cache, persistence, scraping, and SSE subscribers.
@@ -236,6 +262,8 @@ class BoardService:
         self._session = session
         self._repository = repository
         self._boards: dict[str, ChannelBoard] = {}
+        # channel_id -> human display name, for origin labels.
+        self._channel_names: dict[str, str] = {}
         self._metadata_tried: set[str] = set()
         self._lock = asyncio.Lock()
         self._subscribers: dict[str, set[asyncio.Queue[None]]] = {}
@@ -250,6 +278,55 @@ class BoardService:
         # collide on the same channel id. The in-memory cache stays keyed by
         # the raw channel id since each service only sees its own channels.
         return f"{self._connector_id}/{channel_id}"
+
+    # --- channel names (for origin labels) ---
+
+    async def load_channel_names(self) -> None:
+        """Warm the channel-name cache from storage (call once at startup)."""
+        prefix = f"{self._connector_id}/"
+        rows = await self._repository.load_channel_names()
+        self._channel_names = {
+            key.removeprefix(prefix): name
+            for key, name in rows.items()
+            if key.startswith(prefix)
+        }
+
+    async def set_channel_name(self, channel_id: str, name: str | None) -> None:
+        """Track a channel's display name; connectors call this on ingestion."""
+        if not name or self._channel_names.get(channel_id) == name:
+            return
+        # Share the board lock so this commit can't flush a board save's
+        # half-done transaction on the same connection.
+        async with self._lock:
+            self._channel_names[channel_id] = name
+            await self._repository.save_channel_name(self._board_key(channel_id), name)
+
+    async def refresh_channel_names(self) -> None:
+        """Re-fetch the current name of every channel with a board (at startup).
+
+        Picks up channels renamed while we were down, and names for channels
+        whose board predates name tracking.
+        """
+        prefix = f"{self._connector_id}/"
+        keys = await self._repository.load_channel_ids()
+        for channel_id in (
+            k.removeprefix(prefix) for k in keys if k.startswith(prefix)
+        ):
+            await self.set_channel_name(
+                channel_id, await self.fetch_channel_name(channel_id)
+            )
+
+    async def fetch_channel_name(self, channel_id: str) -> str | None:  # noqa: ARG002
+        """Resolve a channel's current display name; overridden per connector."""
+        return None
+
+    def _origin_label(self, channel_id: str) -> str:
+        name = self._channel_names.get(channel_id)
+        return (
+            f"{self._connector_id} \N{MIDDLE DOT} {name}"
+            if name
+            else self._connector_id
+        )
 
     # --- platform hooks (overridden by subclasses) ---
 
@@ -283,7 +360,7 @@ class BoardService:
                     end_date=_parse_iso_date(entry.event_end_date),
                     origins=[
                         Origin(
-                            label=self._connector_id,
+                            label=self._origin_label(channel_id),
                             message_url=self.message_url(
                                 channel_id, entry.source_message_ts
                             ),
