@@ -380,23 +380,16 @@ class BoardService:
         logger.debug(
             "Enriching %d link(s) in %s: %s", len(pending), channel_id, pending
         )
-        scraped = {
-            url: info
-            for url in pending
-            if (info := await self._scrape_metadata(url)) is not None
-        }
-        if not scraped:
-            return
-
-        async with self._lock:
-            board = await self._get_board_locked(channel_id)
-            changed = False
-            for url, info in scraped.items():
+        # Persist each event as it resolves so a crash mid-batch keeps progress.
+        for url in pending:
+            info = await self._scrape_metadata(url)
+            if info is None:
+                continue
+            async with self._lock:
+                board = await self._get_board_locked(channel_id)
                 entry = board.links.get(url)
                 if entry is not None and _apply_metadata(entry, info):
-                    changed = True
-            if changed:
-                await self._persist_locked(channel_id, board)
+                    await self._persist_locked(channel_id, board)
 
     # --- board cache + persistence ---
 
