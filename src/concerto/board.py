@@ -401,12 +401,15 @@ class BoardService:
         counts = aggregate_status_counts(reactions)
         async with self._lock:
             board = await self._get_board_locked(channel_id)
-            for link in links:
+            for index, link in enumerate(links):
                 entry = board.links.setdefault(link, LinkEntry())
                 _set_earliest_source_message_ts(entry, message_id)
-                # ponytail: a URL reposted across messages shows the counts of
-                # whichever post was last reacted on; reactions cluster on one.
-                entry.going, entry.undecided, entry.looking = counts
+                # Reactions belong to the first link only; further links in the
+                # same post are tracked but don't inherit its counts.
+                # ponytail: a URL leading several posts shows the counts of
+                # whichever it last led; reactions cluster on one.
+                if index == 0:
+                    entry.going, entry.undecided, entry.looking = counts
             await self._persist_locked(channel_id, board)
         await self._enrich_links(channel_id, links)
 
@@ -534,14 +537,16 @@ def fold_message(
     if not links:
         return
     going, undecided, looking = aggregate_status_counts(reactions)
-    for link in links:
+    for index, link in enumerate(links):
         entry = entries.setdefault(link, LinkEntry())
         _set_earliest_source_message_ts(entry, message_id)
-        # ponytail: same URL across posts -> keep the highest count per status;
-        # reactions normally sit on one post.
-        entry.going = max(entry.going, going)
-        entry.undecided = max(entry.undecided, undecided)
-        entry.looking = max(entry.looking, looking)
+        # Reactions belong to the first link only (see apply_reactions); extra
+        # links in the post are tracked without counts.
+        # ponytail: same URL across posts -> keep the highest count where it led.
+        if index == 0:
+            entry.going = max(entry.going, going)
+            entry.undecided = max(entry.undecided, undecided)
+            entry.looking = max(entry.looking, looking)
 
 
 def extract_links(text: str) -> list[str]:
