@@ -105,15 +105,24 @@ class SlackBotService(BoardService):
             await self._handle_reaction_event(event)
 
     async def _handle_message_event(self, event: dict[str, Any]) -> None:
-        if event.get("subtype"):
+        subtype = str(event.get("subtype", ""))
+        # Edits/deletes go through the same path: apply_message drops the links
+        # the message no longer carries ("" for a delete).
+        if subtype == "message_changed":
+            edited = event.get("message")
+            edited = edited if isinstance(edited, dict) else {}
+            ts, text = edited.get("ts"), str(edited.get("text", ""))
+        elif subtype == "message_deleted":
+            ts, text = event.get("deleted_ts"), ""
+        elif subtype:
             return
+        else:
+            ts, text = event.get("ts"), str(event.get("text", ""))
         channel_id = str(event.get("channel", ""))
         if not self.is_supported_channel(channel_id):
             return
         await self._ensure_channel_name(channel_id)
-        await self.apply_message(
-            channel_id, event.get("ts"), str(event.get("text", ""))
-        )
+        await self.apply_message(channel_id, ts, text)
 
     async def _handle_member_joined_channel_event(self, event: dict[str, Any]) -> None:
         if not self._bot_user_id:

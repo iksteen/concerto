@@ -379,15 +379,30 @@ class BoardService:
     async def apply_message(
         self, channel_id: str, message_id: object, text: str
     ) -> None:
-        """Track links in a posted message, from this post onward."""
+        """Track a message's links; drop the ones it no longer contains.
+
+        Also the edit/delete path: pass the new text (``""`` for a delete) and
+        links sourced from this message that are gone from it are removed.
+        """
         links = extract_links(text)
-        if not links:
-            return
+        ts = _normalize_ts(message_id)
         async with self._lock:
             board = await self._get_board_locked(channel_id)
+            # ponytail: only entries whose earliest source is this message are
+            # dropped; a URL first posted elsewhere stays, and one re-posted
+            # later comes back on the next rebuild.
+            stale = [
+                url
+                for url, entry in board.links.items()
+                if ts and entry.source_message_ts == ts and url not in links
+            ]
+            for url in stale:
+                del board.links[url]
             for link in links:
                 entry = board.links.setdefault(link, LinkEntry())
                 _set_earliest_source_message_ts(entry, message_id)
+            if not stale and not links:
+                return
             await self._persist_locked(channel_id, board)
         await self._enrich_links(channel_id, links)
 

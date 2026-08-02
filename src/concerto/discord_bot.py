@@ -176,6 +176,25 @@ class DiscordBotService(BoardService):
             await self._on_message(message)
 
         @client.event
+        async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent) -> None:
+            # Raw, so edits of messages posted before startup count too. Only
+            # content edits matter; embed-only updates carry no "content".
+            content = payload.data.get("content")
+            if isinstance(content, str):
+                await self._reingest(payload.channel_id, payload.message_id, content)
+
+        @client.event
+        async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent) -> None:
+            await self._reingest(payload.channel_id, payload.message_id, "")
+
+        @client.event
+        async def on_raw_bulk_message_delete(
+            payload: discord.RawBulkMessageDeleteEvent,
+        ) -> None:
+            for message_id in payload.message_ids:
+                await self._reingest(payload.channel_id, message_id, "")
+
+        @client.event
         async def on_raw_reaction_add(
             payload: discord.RawReactionActionEvent,
         ) -> None:
@@ -216,6 +235,11 @@ class DiscordBotService(BoardService):
         )
         await self._remember_guild(message.channel)
         await self.apply_message(str(message.channel.id), message.id, message.content)
+
+    async def _reingest(self, channel_id: int, message_id: int, content: str) -> None:
+        if not self.is_supported_channel(str(channel_id)):
+            return
+        await self.apply_message(str(channel_id), message_id, content)
 
     def _match_command(self, content: str) -> str | None:
         return {
