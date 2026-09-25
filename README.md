@@ -11,7 +11,7 @@ connector's channels are namespaced so they never collide.
 - Extracts links from channel messages and adds them to a tracked list
 - Scrapes each tracked link for concert metadata (band, date, venue) and stores it alongside the link
 - Marks a link as expired when its page is gone (404/410/401) or redirects to a listing page (the event has been removed and is in the past)
-- Serves a web overview of a channel's upcoming events at `GET /board/{connector}/{channel_id}` (`connector` is the name from the config), grouped into Date unknown (top), This week, This month, and Upcoming, ordered by date, with expired/past events hidden; each event shows emoji counts of how many have a ticket (🎫), are interested (👀), or are looking for a ticket (🙏)
+- Serves a web overview of a channel's upcoming events at `GET /board/{connector}/{channel_id}` (`connector` is the name from the config), grouped into Date unknown (top), This week, This month, and Upcoming, ordered by date, with expired/past events and links without a parsed date or venue (e.g. homepages, agenda listings) hidden; each event shows emoji counts of how many have a ticket (🎫), are interested (👀), or are looking for a ticket (🙏)
 - `:+1:` (or `:thumbsup:` / `:ticket:`): user has a ticket
 - `:question:` (or `:grey_question:` / `:eyes:`): user is interested, no ticket yet
 - `:pray:`: user is trying to get a sold-out ticket via TicketSwap

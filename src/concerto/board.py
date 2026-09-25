@@ -969,6 +969,10 @@ def _render_status(going: int, undecided: int, looking: int) -> str:
 def _is_upcoming(view: EventView, today: dt.date) -> bool:
     if view.expired:
         return False
+    # Without a date or venue we couldn't parse an event (e.g. a homepage or an
+    # agenda listing whose page title merely landed in `band`) — don't show it.
+    if view.date is None and not view.venue:
+        return False
     # End of the run if it's a multi-day event, else the single date.
     effective = view.end_date or view.date
     return effective is None or effective >= today
