@@ -561,6 +561,23 @@ def parse_patronaat(html: str, url: str) -> ConcertInfo:
     return info
 
 
+# "Buy tickets for <band> at <venue> on <date> at www.livenation.nl. ..."
+_LIVENATION_DESCRIPTION = re.compile(
+    r"^Buy tickets for (.+) at (.+?) on (.+?) at www\."
+)
+
+
+def parse_livenation(html: str, url: str) -> ConcertInfo:
+    # A promoter, not a venue: the hall differs per event.
+    info = ConcertInfo(url=url)
+    match = _LIVENATION_DESCRIPTION.match(_meta_content(html, "og:description") or "")
+    if match:
+        info.band = _strip_status_prefix(match[1])
+        info.venue = match[2]
+        info.date, info.raw_date = parse_date(match[3])
+    return info
+
+
 PARSERS: dict[str, Callable[[str, str], ConcertInfo]] = {
     "tivolivredenburg.nl": parse_tivoli,
     "paradiso.nl": parse_paradiso,
@@ -571,6 +588,7 @@ PARSERS: dict[str, Callable[[str, str], ConcertInfo]] = {
     "dehelling.nl": parse_json_ld,
     "dedoelen.nl": parse_json_ld,
     "ticketmaster.nl": parse_json_ld,
+    "livenation.nl": parse_livenation,
     "paard.nl": _json_ld_with_venue("Paard"),
     "amare.nl": _json_ld_with_venue("Amare"),
     "013.nl": _json_ld_with_venue("013"),
