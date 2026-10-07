@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import random
 import re
 import sys
 from dataclasses import dataclass
 from html import unescape
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import aiohttp
 
@@ -30,6 +32,12 @@ REQUEST_TIMEOUT_SECONDS = 20
 # Some sites (e.g. Ticketmaster) send headers larger than aiohttp's 8 KiB
 # default, which otherwise fails the request.
 MAX_HEADER_BYTES = 32768
+# Some sites (e.g. Paradiso) occasionally serve a page skeleton without the
+# event data. Refetch a result without a band after a jittered delay; the date
+# alone isn't a signal, since the full-text fallback finds junk dates (e.g. in
+# image filenames) on such a skeleton.
+EMPTY_RETRIES = 2
+EMPTY_RETRY_DELAY_SECONDS = (1.0, 3.0)
 _DAYS_IN_MONTH = 31
 
 _MONTHS: dict[str, int] = {
@@ -358,14 +366,76 @@ def parse_tivoli(html: str, url: str) -> ConcertInfo:
     return parse_json_ld(html, url)
 
 
+_AMSTERDAM = ZoneInfo("Europe/Amsterdam")
+# Next.js App Router pages stream their data as JS string literals.
+_NEXT_F_PUSH = re.compile(r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)')
+
+
+def _paradiso_entry(html: str, url: str) -> dict[str, object] | None:
+    """Return this event's entry object from the React Server Components stream.
+
+    The page also embeds related events, so anchor on this event's id (the
+    URL's last path segment).
+    """
+    event_id = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+    marker = re.compile(
+        r'\{"__typename":"event_\w+_Entry","id":"' + re.escape(event_id) + '"'
+    )
+    decoder = json.JSONDecoder()
+    for chunk in _NEXT_F_PUSH.finditer(html):
+        try:
+            text = json.loads(chunk[1])
+        except ValueError:
+            continue
+        found = marker.search(text) if isinstance(text, str) else None
+        if not found:
+            continue
+        try:
+            entry, _ = decoder.raw_decode(text, found.start())
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            return entry
+    return None
+
+
+_CANONICAL = re.compile(r'<link rel="canonical" href="([^"]+)"')
+
+
 def parse_paradiso(html: str, url: str) -> ConcertInfo:
+    # Unknown event ids redirect to /contact (HTTP 200) instead of a 404.
+    canonical = _CANONICAL.search(html)
+    event_id = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+    if canonical and event_id not in urlsplit(canonical[1]).path.split("/"):
+        return ConcertInfo(url=url, expired=True)
     info = ConcertInfo(url=url, venue="Paradiso")
-    title = _meta_content(html, "og:title")
-    if title:
-        info.band = title.split("|")[0].strip()
-    info.date, info.raw_date = parse_date(_meta_content(html, "og:description"))
+    entry = _paradiso_entry(html, url)
+    if entry is not None:
+        title = entry.get("title")
+        if isinstance(title, str) and title.strip():
+            info.band = _strip_status_prefix(title.strip())
+        # Paradiso also sells shows at Tolhuistuin, Bitterzoet, etc.
+        location = entry.get("location")
+        if isinstance(location, dict):
+            venue = location.get("title")
+            if isinstance(venue, str) and venue.strip():
+                info.venue = venue.strip()
+        start = entry.get("startDateTime")
+        if isinstance(start, str):
+            try:
+                # UTC; convert so late shows don't land on the wrong day.
+                local = dt.datetime.fromisoformat(start).astimezone(_AMSTERDAM)
+            except ValueError:
+                pass
+            else:
+                info.date, info.raw_date = local.date(), start
+    if info.band is None:
+        title = _meta_content(html, "og:title")
+        if title:
+            info.band = title.split("|")[0].strip()
     if info.date is None:
-        info.date, info.raw_date = parse_date(_strip_tags(html))
+        # "Op vrijdag 16 oktober ..." — often without a year.
+        info.date, info.raw_date = parse_date(_meta_content(html, "og:description"))
     return info
 
 
@@ -634,7 +704,7 @@ def parse(html: str, url: str) -> ConcertInfo:
     """Parse a concert page into a :class:`ConcertInfo`."""
     parser = _parser_for(url)
     info = parser(html, url) if parser else parse_json_ld(html, url)
-    if not info.is_complete:
+    if not info.is_complete and not info.expired:
         _fill_gaps(info, html, url)
     return info
 
@@ -680,10 +750,16 @@ async def scrape(url: str, session: aiohttp.ClientSession | None = None) -> Conc
             timeout=timeout, max_field_size=MAX_HEADER_BYTES
         ) as owned_session:
             return await scrape(url, owned_session)
-    html = await _fetch(session, url)
-    if html is None:
-        return ConcertInfo(url=url, expired=True)
-    return parse(html, url)
+    for attempt in range(EMPTY_RETRIES + 1):
+        if attempt:
+            await asyncio.sleep(random.uniform(*EMPTY_RETRY_DELAY_SECONDS))  # noqa: S311
+        html = await _fetch(session, url)
+        if html is None:
+            return ConcertInfo(url=url, expired=True)
+        info = parse(html, url)
+        if info.band or info.expired:
+            break
+    return info
 
 
 async def scrape_many(urls: Iterable[str]) -> list[ConcertInfo | ScrapeError]:
