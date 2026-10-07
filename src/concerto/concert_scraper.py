@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import logging
 import random
 import re
 import sys
@@ -23,6 +24,8 @@ import aiohttp
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+
+logger = logging.getLogger(__name__)
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -114,6 +117,10 @@ class ScrapeError(RuntimeError):
     pass
 
 
+class _NotEventPageError(Exception):
+    """A parser recognised the page as not being an event page at all."""
+
+
 # --------------------------------------------------------------------------- #
 # Date parsing
 # --------------------------------------------------------------------------- #
@@ -157,6 +164,8 @@ def parse_date(text: str | None) -> tuple[dt.date | None, str | None]:
 
     return None, None
 
+
+_CANONICAL = re.compile(r'<link[^>]*\brel="canonical"[^>]*\bhref="([^"]+)"')
 
 # <time datetime="2026-06-05">...</time> — a reliable machine-readable date.
 _TIME_TAG = re.compile(r'<time[^>]*\bdatetime=["\']([^"\']+)["\']', re.IGNORECASE)
@@ -245,8 +254,15 @@ _STATUS_PREFIXES = (
 )
 
 
+# The same badges set inline in asterisks, e.g. "TOMORA *uitverkocht* — AURORA".
+_INLINE_STATUS = re.compile(
+    r"\s*\*\s*(?:" + "|".join(map(re.escape, _STATUS_PREFIXES)) + r")\b[^*]*\*",
+    re.IGNORECASE,
+)
+
+
 def _strip_status_prefix(name: str) -> str:
-    cleaned = name.strip()
+    cleaned = _INLINE_STATUS.sub("", name).strip()
     for separator in ("|", ":"):
         head, found, tail = cleaned.partition(separator)
         head = head.strip()
@@ -399,9 +415,6 @@ def _paradiso_entry(html: str, url: str) -> dict[str, object] | None:
     return None
 
 
-_CANONICAL = re.compile(r'<link rel="canonical" href="([^"]+)"')
-
-
 def parse_paradiso(html: str, url: str) -> ConcertInfo:
     # Unknown event ids redirect to /contact (HTTP 200) instead of a 404.
     canonical = _CANONICAL.search(html)
@@ -498,14 +511,22 @@ def parse_ziggo(html: str, url: str) -> ConcertInfo:
     return info
 
 
-def _json_ld_with_venue(venue: str) -> Callable[[str, str], ConcertInfo]:
+def _json_ld_with_venue(
+    venue: str, *, require_event: bool = False
+) -> Callable[[str, str], ConcertInfo]:
     """JSON-LD parser that forces the venue name.
 
     Some sites have complete JSON-LD but report the hall as ``location.name``
     (e.g. "Grolsch Zaal", "Concertzaal") rather than the building.
+
+    With ``require_event``, a page without Event JSON-LD is rejected as not an
+    event page (e.g. a queue or error page) instead of falling back to its
+    generic title.
     """
 
     def parser(html: str, url: str) -> ConcertInfo:
+        if require_event and not any(_is_event(o) for o in _json_ld_objects(html)):
+            raise _NotEventPageError
         info = parse_json_ld(html, url)
         info.venue = venue
         return info
@@ -676,7 +697,9 @@ PARSERS: dict[str, Callable[[str, str], ConcertInfo]] = {
     "ticketmaster.nl": parse_json_ld,
     "livenation.nl": parse_livenation,
     "paard.nl": _json_ld_with_venue("Paard"),
-    "amare.nl": _json_ld_with_venue("Amare"),
+    # Amare puts visitors through a queue (/csq/) that can serve a non-event
+    # page carrying only the site's default title.
+    "amare.nl": _json_ld_with_venue("Amare", require_event=True),
     "013.nl": _json_ld_with_venue("013"),
     "musicon.nl": _json_ld_with_venue("Musicon"),
     "effenaar.nl": _json_ld_with_venue("Effenaar"),
@@ -702,8 +725,17 @@ def _parser_for(url: str) -> Callable[[str, str], ConcertInfo] | None:
 
 def parse(html: str, url: str) -> ConcertInfo:
     """Parse a concert page into a :class:`ConcertInfo`."""
+    canonical = _CANONICAL.search(html)
+    if canonical and _redirected_to_ancestor(url, canonical[1]):
+        # We were served the home page or a listing (e.g. Amare's visitor queue
+        # landing on "/"), not the event. Return nothing rather than that page's
+        # title; it may be transient, so don't mark the event expired either.
+        return ConcertInfo(url=url)
     parser = _parser_for(url)
-    info = parser(html, url) if parser else parse_json_ld(html, url)
+    try:
+        info = parser(html, url) if parser else parse_json_ld(html, url)
+    except _NotEventPageError:
+        return ConcertInfo(url=url)
     if not info.is_complete and not info.expired:
         _fill_gaps(info, html, url)
     return info
@@ -738,6 +770,12 @@ async def _fetch(session: aiohttp.ClientSession, url: str) -> str | None:
         if response.status >= HTTP_ERROR_STATUS:
             msg = f"GET {url} returned HTTP {response.status}"
             raise ScrapeError(msg)
+        if response.history:
+            logger.debug(
+                "Fetched %s via %s",
+                response.url,
+                " -> ".join(str(hop.url) for hop in response.history),
+            )
         if _redirected_to_ancestor(url, str(response.url)):
             return None
         return await response.text()
@@ -759,6 +797,7 @@ async def scrape(url: str, session: aiohttp.ClientSession | None = None) -> Conc
         info = parse(html, url)
         if info.band or info.expired:
             break
+        logger.debug("No event data in %s (attempt %d)", url, attempt + 1)
     return info
 
 
