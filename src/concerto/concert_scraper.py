@@ -618,6 +618,7 @@ PARSERS: dict[str, Callable[[str, str], ConcertInfo]] = {
     "vorstin.nl": _meta_parser("De Vorstin"),
     "mainstage.nl": _meta_parser("Mainstage"),
     "mge.nl": parse_mge,
+    "tolhuistuin.nl": _meta_parser("Tolhuistuin"),
 }
 
 
