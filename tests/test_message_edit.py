@@ -3,21 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
-from concerto.board import BoardRepository, BoardService
+from concerto.board import BoardRepository, BoardService, ChannelBoard, LinkEntry
 
 
 class _Repo(BoardRepository):
     def __init__(self) -> None:  # no db
-        self.saved: dict[str, Any] = {}
+        self.saved: dict[str, dict[str, LinkEntry]] = {}
 
-    async def load_board(self, channel_id: str) -> Any:  # noqa: ARG002
-        from concerto.board import ChannelBoard
-
+    async def load_board(self, channel_id: str) -> ChannelBoard:  # noqa: ARG002
         return ChannelBoard()
 
-    async def save_board(self, channel_id: str, board: Any) -> None:
+    async def save_board(self, channel_id: str, board: ChannelBoard) -> None:
         self.saved[channel_id] = dict(board.links)
 
 
@@ -25,7 +22,7 @@ class _Service(BoardService):
     def is_supported_channel(self, channel_id: str) -> bool:  # noqa: ARG002
         return True
 
-    async def _enrich_links(self, channel_id: str, urls: list[str]) -> None:
+    async def _enrich_links(self, channel_id: str, urls: list[str]) -> None:  # noqa: ARG002
         return
 
 
@@ -35,7 +32,7 @@ async def _exercise() -> None:
     b = "https://example.com/b"
 
     await service.apply_message("chan", 100, f"{a} {b}")
-    links = (await service._get_board_locked("chan")).links  # noqa: SLF001
+    links = (await service._get_board_locked("chan")).links
     assert set(links) == {a, b}
 
     # Edit: b removed from the message.
