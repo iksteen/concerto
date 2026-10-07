@@ -466,6 +466,22 @@ def _meta_parser(venue: str) -> Callable[[str, str], ConcertInfo]:
     return parser
 
 
+_parse_mge_title = _meta_parser("MgE - Muziekgebouw Eindhoven")
+
+
+def parse_mge(html: str, url: str) -> ConcertInfo:
+    # og:title ends in "- MgE - Muziekgebouw Eindhoven"; strip that whole
+    # suffix but report the plain building name.
+    info = _parse_mge_title(html, url)
+    info.venue = "Muziekgebouw Eindhoven"
+    # The hero's first <time> ("Zo 31 jan 2027") has no datetime attribute,
+    # and the page text otherwise yields the JSON-LD datePublished first.
+    heading = re.search(r'<time class="heading-time">([^<]+)</time>', html)
+    if heading:
+        info.date, info.raw_date = parse_date(heading[1])
+    return info
+
+
 def parse_p60(html: str, url: str) -> ConcertInfo:
     info = ConcertInfo(url=url, venue="P60")
     title = _meta_content(html, "og:title") or _title(html) or ""
@@ -601,6 +617,7 @@ PARSERS: dict[str, Callable[[str, str], ConcertInfo]] = {
     "nobel.nl": _meta_parser("Nobel"),
     "vorstin.nl": _meta_parser("De Vorstin"),
     "mainstage.nl": _meta_parser("Mainstage"),
+    "mge.nl": parse_mge,
 }
 
 
