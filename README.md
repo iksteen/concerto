@@ -15,6 +15,7 @@ connector's channels are namespaced so they never collide.
 - `:+1:` (or `:thumbsup:` / `:ticket:`): user has a ticket
 - `:question:` (or `:grey_question:` / `:eyes:`): user is interested, no ticket yet
 - `:pray:`: user is trying to get a sold-out ticket via TicketSwap
+- `:recycle:` (♻️): re-scrape the links in that message, replacing their stored metadata (e.g. after a venue changed its page or a scrape picked up the wrong data)
 - Slack: rescan a channel's history with the `/concerto rebuild` slash command, and the bot backfills automatically when invited to a channel
 - Discord: tracking is opt-in — `!concerto track` a channel (backfills in the background), `!concerto untrack` to stop, `!concerto rebuild` to rescan
 - Tracked data is stored in SQLite only; the bot never posts messages (on Discord it acknowledges `track`/`untrack`/`rebuild` commands by reacting to them)

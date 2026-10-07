@@ -17,6 +17,7 @@ from concerto.board import (
     PLUS_ONE_REACTIONS,
     PRAY_REACTIONS,
     QUESTION_REACTIONS,
+    REINDEX_REACTIONS,
     BoardRepository,
     BoardService,
     LinkEntry,
@@ -49,6 +50,8 @@ _UNICODE_TO_NAME = {
     "\N{WHITE QUESTION MARK ORNAMENT}": "grey_question",
     "\N{EYES}": "eyes",
     "\N{PERSON WITH FOLDED HANDS}": "pray",
+    "\N{BLACK UNIVERSAL RECYCLING SYMBOL}": "recycle",
+    "\N{BLACK UNIVERSAL RECYCLING SYMBOL}\N{VARIATION SELECTOR-16}": "recycle",
 }
 
 
@@ -254,8 +257,11 @@ class DiscordBotService(BoardService):
             return
         if not self.is_supported_channel(str(payload.channel_id)):
             return
+        name = _reaction_name(payload.emoji)
+        # Only adding the reindex reaction triggers it; removing it is a no-op.
+        reindex = name in REINDEX_REACTIONS and payload.event_type == "REACTION_ADD"
         # Skip a message fetch for reactions we don't track.
-        if _reaction_name(payload.emoji) not in TRACKED_REACTIONS:
+        if not reindex and name not in TRACKED_REACTIONS:
             return
 
         channel = self._client.get_channel(payload.channel_id)
@@ -268,10 +274,13 @@ class DiscordBotService(BoardService):
         except (discord.NotFound, discord.Forbidden):
             return
 
-        # Re-parse the whole message's reactions, never the single delta.
-        reactions = await _normalize_reactions(message)
         await self.set_channel_name(str(channel.id), _channel_name(channel))
         await self._remember_guild(channel)
+        if reindex:
+            await self.reindex_message(str(channel.id), message.id, message.content)
+            return
+        # Re-parse the whole message's reactions, never the single delta.
+        reactions = await _normalize_reactions(message)
         await self.apply_reactions(
             str(channel.id), message.id, message.content, reactions
         )

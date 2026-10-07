@@ -50,6 +50,9 @@ def request_shutdown() -> None:
 PLUS_ONE_REACTIONS = {"+1", "thumbsup", "ticket"}
 QUESTION_REACTIONS = {"question", "grey_question", "eyes"}
 PRAY_REACTIONS = {"pray"}
+# Adding one of these to a message re-scrapes its links, replacing stored
+# metadata (e.g. after a venue changed its page, or a bad scrape stuck).
+REINDEX_REACTIONS = {"recycle"}
 
 # Links on these domains (and their subdomains) are never tracked.
 IGNORED_LINK_DOMAINS = (
@@ -428,6 +431,21 @@ class BoardService:
             await self._persist_locked(channel_id, board)
         await self._enrich_links(channel_id, links)
 
+    async def reindex_message(
+        self, channel_id: str, message_id: object, text: str
+    ) -> None:
+        """Re-scrape a message's links, replacing their stored metadata."""
+        links = extract_links(text)
+        if not links:
+            return
+        async with self._lock:
+            board = await self._get_board_locked(channel_id)
+            for link in links:
+                entry = board.links.setdefault(link, LinkEntry())
+                _set_earliest_source_message_ts(entry, message_id)
+            await self._persist_locked(channel_id, board)
+        await self._enrich_links(channel_id, links, force=True)
+
     async def replace_board(
         self, channel_id: str, entries: dict[str, LinkEntry]
     ) -> None:
@@ -475,14 +493,24 @@ class BoardService:
         )
         return info
 
-    async def _enrich_links(self, channel_id: str, urls: list[str]) -> None:
+    async def _enrich_links(
+        self, channel_id: str, urls: list[str], *, force: bool = False
+    ) -> None:
+        """Scrape metadata for links that lack it.
+
+        With ``force``, scrape every link regardless and replace (rather than
+        fill in) its metadata; a failed scrape keeps what was stored.
+        """
         async with self._lock:
             board = await self._get_board_locked(channel_id)
             pending = [
                 url
                 for url in dict.fromkeys(urls)
-                if url not in self._metadata_tried
-                and not (url in board.links and board.links[url].is_resolved)
+                if force
+                or (
+                    url not in self._metadata_tried
+                    and not (url in board.links and board.links[url].is_resolved)
+                )
             ]
             self._metadata_tried.update(pending)
 
@@ -500,7 +528,7 @@ class BoardService:
             async with self._lock:
                 board = await self._get_board_locked(channel_id)
                 entry = board.links.get(url)
-                if entry is not None and _apply_metadata(entry, info):
+                if entry is not None and _apply_metadata(entry, info, replace=force):
                     await self._persist_locked(channel_id, board)
 
     # --- board cache + persistence ---
@@ -640,7 +668,9 @@ def _merge_link_entry(target: LinkEntry, source: LinkEntry) -> bool:
     return before != after
 
 
-def _apply_metadata(entry: LinkEntry, info: concert_scraper.ConcertInfo) -> bool:
+def _apply_metadata(
+    entry: LinkEntry, info: concert_scraper.ConcertInfo, *, replace: bool = False
+) -> bool:
     before = (
         entry.band,
         entry.event_date,
@@ -648,6 +678,9 @@ def _apply_metadata(entry: LinkEntry, info: concert_scraper.ConcertInfo) -> bool
         entry.venue,
         entry.expired,
     )
+    if replace:
+        entry.band = entry.event_date = entry.event_end_date = entry.venue = None
+        entry.expired = False
     if info.band:
         entry.band = info.band
     if info.date:

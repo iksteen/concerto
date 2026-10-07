@@ -17,6 +17,7 @@ from concerto.board import (
     PLUS_ONE_REACTIONS,
     PRAY_REACTIONS,
     QUESTION_REACTIONS,
+    REINDEX_REACTIONS,
     BoardRepository,
     BoardService,
     LinkEntry,
@@ -138,8 +139,14 @@ class SlackBotService(BoardService):
 
     async def _handle_reaction_event(self, event: dict[str, Any]) -> None:
         reaction = str(event.get("reaction", ""))
+        # Only adding the reindex reaction triggers it; removing it is a no-op.
+        reindex = (
+            reaction in REINDEX_REACTIONS
+            and str(event.get("type", "")) == "reaction_added"
+        )
         if (
-            reaction not in PLUS_ONE_REACTIONS
+            not reindex
+            and reaction not in PLUS_ONE_REACTIONS
             and reaction not in QUESTION_REACTIONS
             and reaction not in PRAY_REACTIONS
         ):
@@ -159,6 +166,11 @@ class SlackBotService(BoardService):
         # so we only ever keep aggregate counts and never store who reacted.
         message = await self._get_message(channel_id, message_ts)
         if message is None:
+            return
+        if reindex:
+            await self.reindex_message(
+                channel_id, message_ts, str(message.get("text", ""))
+            )
             return
         await self.apply_reactions(
             channel_id,

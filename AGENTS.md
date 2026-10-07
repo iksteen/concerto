@@ -63,6 +63,7 @@ After links are persisted, `_enrich_links` runs the concert scraper (`concert_sc
 - **Message edited / deleted** → the same `apply_message` with the new text (`""` for a delete): links whose `source_message_ts` is that message and that are gone from it are dropped. Slack sends `message_changed`/`message_deleted` subtypes; Discord uses the raw edit/delete/bulk-delete events (raw, so pre-startup messages count).
 - **Reaction add/remove** → fetch the reacted message, then `apply_reactions`: re-extract links, re-parse *all* its reactions into counts (not the single delta), persist, then enrich.
 - **Bot joins channel** (`member_joined_channel` for the bot's own user) → scan full history into entries, then `merge_entries`, then enrich.
+- **`:recycle:` reaction added** (`REINDEX_REACTIONS`; removal is ignored) → fetch the reacted message, then `reindex_message`: ensure its links are tracked, then `_enrich_links(force=True)`, which re-scrapes them regardless of `_metadata_tried`/`is_resolved` and *replaces* the stored metadata (a failed scrape keeps the old data).
 - **`/concerto rebuild`** (also accepts `rescan`) → scan full history into entries, then `replace_board`, then enrich.
 
 Slack history scans (`_collect_history_link_entries`) paginate `conversations.history` and fold each message into the entries dict via `board.fold_message`; Slack's `reactions[]` already matches the neutral shape.

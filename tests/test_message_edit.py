@@ -22,7 +22,13 @@ class _Service(BoardService):
     def is_supported_channel(self, channel_id: str) -> bool:  # noqa: ARG002
         return True
 
-    async def _enrich_links(self, channel_id: str, urls: list[str]) -> None:  # noqa: ARG002
+    async def _enrich_links(
+        self,
+        channel_id: str,  # noqa: ARG002
+        urls: list[str],  # noqa: ARG002
+        *,
+        force: bool = False,  # noqa: ARG002
+    ) -> None:
         return
 
 

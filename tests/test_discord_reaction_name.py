@@ -11,6 +11,12 @@ def test_unicode_strings_map_to_shortcodes() -> None:
     # Raw unicode string (how discord.py delivers unicode reactions).
     assert _reaction_name("\N{THUMBS UP SIGN}") == "thumbsup"
     assert _reaction_name("\N{PERSON WITH FOLDED HANDS}") == "pray"
+    # Recycle, with and without the emoji-presentation variation selector.
+    assert _reaction_name("\N{BLACK UNIVERSAL RECYCLING SYMBOL}") == "recycle"
+    assert (
+        _reaction_name("\N{BLACK UNIVERSAL RECYCLING SYMBOL}\N{VARIATION SELECTOR-16}")
+        == "recycle"
+    )
     # Unknown unicode passes through unchanged (won't match a tracked set).
     assert _reaction_name("\N{PILE OF POO}") == "\N{PILE OF POO}"
 
