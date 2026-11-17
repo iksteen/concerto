@@ -167,16 +167,12 @@ class SlackBotService(BoardService):
         message = await self._get_message(channel_id, message_ts)
         if message is None:
             return
-        if reindex:
-            await self.reindex_message(
-                channel_id, message_ts, str(message.get("text", ""))
-            )
-            return
         await self.apply_reactions(
             channel_id,
             message_ts,
             str(message.get("text", "")),
             message.get("reactions"),
+            force=reindex,
         )
 
     async def handle_rebuild_command(self, channel_id: str) -> None:

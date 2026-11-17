@@ -410,9 +410,18 @@ class BoardService:
         await self._enrich_links(channel_id, links)
 
     async def apply_reactions(
-        self, channel_id: str, message_id: object, text: str, reactions: object
+        self,
+        channel_id: str,
+        message_id: object,
+        text: str,
+        reactions: object,
+        *,
+        force: bool = False,
     ) -> None:
-        """Re-parse a message's full reaction set into aggregate counts."""
+        """Re-parse a message's full reaction set into aggregate counts.
+
+        ``force`` re-scrapes the links, replacing their stored metadata.
+        """
         links = extract_links(text)
         if not links:
             return
@@ -429,22 +438,7 @@ class BoardService:
                 if index == 0:
                     entry.going, entry.undecided, entry.looking = counts
             await self._persist_locked(channel_id, board)
-        await self._enrich_links(channel_id, links)
-
-    async def reindex_message(
-        self, channel_id: str, message_id: object, text: str
-    ) -> None:
-        """Re-scrape a message's links, replacing their stored metadata."""
-        links = extract_links(text)
-        if not links:
-            return
-        async with self._lock:
-            board = await self._get_board_locked(channel_id)
-            for link in links:
-                entry = board.links.setdefault(link, LinkEntry())
-                _set_earliest_source_message_ts(entry, message_id)
-            await self._persist_locked(channel_id, board)
-        await self._enrich_links(channel_id, links, force=True)
+        await self._enrich_links(channel_id, links, force=force)
 
     async def replace_board(
         self, channel_id: str, entries: dict[str, LinkEntry]

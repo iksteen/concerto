@@ -1,4 +1,4 @@
-"""A reindex re-scrapes a message's links and replaces their metadata."""
+"""A reindex recounts a message's reactions and replaces its links' metadata."""
 
 from __future__ import annotations
 
@@ -52,13 +52,21 @@ async def _exercise() -> None:
     service.results.append(
         ConcertInfo(url=URL, band="Band", date=dt.date(2026, 10, 31))
     )
-    await service.reindex_message("chan", 100, URL)
+    # It also recounts the reactions already on the message, e.g. when an edit
+    # swapped in this link after people had reacted.
+    reactions = [
+        {"name": "+1", "users": ["u1", "u2"]},
+        {"name": "eyes", "users": ["u2", "u3"]},
+        {"name": "recycle", "users": ["u1"]},
+    ]
+    await service.apply_reactions("chan", 100, URL, reactions, force=True)
     assert service.scraped == 2
     assert (entry.band, entry.event_date, entry.venue) == ("Band", "2026-10-31", None)
+    assert (entry.going, entry.undecided, entry.looking) == (2, 1, 0)
 
     # A failed scrape keeps what was stored.
     service.results.append(None)
-    await service.reindex_message("chan", 100, URL)
+    await service.apply_reactions("chan", 100, URL, reactions, force=True)
     assert service.scraped == 3
     assert entry.band == "Band"
 

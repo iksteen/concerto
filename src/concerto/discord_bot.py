@@ -276,13 +276,10 @@ class DiscordBotService(BoardService):
 
         await self.set_channel_name(str(channel.id), _channel_name(channel))
         await self._remember_guild(channel)
-        if reindex:
-            await self.reindex_message(str(channel.id), message.id, message.content)
-            return
         # Re-parse the whole message's reactions, never the single delta.
         reactions = await _normalize_reactions(message)
         await self.apply_reactions(
-            str(channel.id), message.id, message.content, reactions
+            str(channel.id), message.id, message.content, reactions, force=reindex
         )
 
     async def _track(self, message: discord.Message) -> None:
