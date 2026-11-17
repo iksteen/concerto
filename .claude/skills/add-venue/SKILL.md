@@ -90,7 +90,7 @@ Keep it minimal: set what you can, let `parse()` call `_fill_gaps` for the rest.
    one event can pass by luck. Confirm band/date/venue.
 3. Also confirm a removed event still reports `EXPIRED` (the scraper detects
    404/410/401 and redirect-to-listing on its own — don't special-case it).
-4. Lint + type-check (no test suite in this repo):
+4. Lint + type-check + tests:
 
 ```bash
 uv run pre-commit run -a    # mypy --strict + ruff, must pass

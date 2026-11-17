@@ -12,7 +12,7 @@
   - `uv run pre-commit run -a`
 - Or individually: `uv run mypy src` (strict), `uv run ruff check src`, `uv run ruff format src`.
 - `select = ["ALL"]` in ruff with a curated ignore list (see `pyproject.toml`); mypy runs `--strict`. New code must pass both.
-- There is no test suite. (Note: `.pre-commit-config.yaml` says `poetry run mypy`, but this project uses `uv`.)
+- Tests live in `tests/` (pytest, run by pre-commit; or `uv run pytest`).
 
 ## Running
 
