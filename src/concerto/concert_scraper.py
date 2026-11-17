@@ -748,6 +748,11 @@ def parse(html: str, url: str) -> ConcertInfo:
 # 401 is included because some sites (e.g. Ticketmaster) return it for removed
 # event pages, which are inaccessible even in a browser.
 GONE_STATUS = {401, 404, 410}
+# Response headers that mark a bot-protection challenge rather than a real
+# status: Ticketmaster answers blocked clients with a 401 "verify your
+# identity" page carrying ``tm-bl``. That says nothing about the event, so it
+# must not be mistaken for a removed page.
+BOT_CHALLENGE_HEADERS = ("tm-bl",)
 HTTP_ERROR_STATUS = 400
 
 
@@ -765,6 +770,9 @@ def _redirected_to_ancestor(requested: str, final: str) -> bool:
 async def _fetch(session: aiohttp.ClientSession, url: str) -> str | None:
     """Return the page HTML, or None if the event is gone (expired)."""
     async with session.get(url, headers={"User-Agent": USER_AGENT}) as response:
+        if any(header in response.headers for header in BOT_CHALLENGE_HEADERS):
+            msg = f"GET {url} was blocked by bot protection (HTTP {response.status})"
+            raise ScrapeError(msg)
         if response.status in GONE_STATUS:
             return None
         if response.status >= HTTP_ERROR_STATUS:
