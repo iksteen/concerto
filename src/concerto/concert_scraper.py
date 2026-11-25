@@ -653,6 +653,37 @@ def parse_castlefest(html: str, url: str) -> ConcertInfo:
     return info
 
 
+# "Down The Rabbit Hole 2027: 2 t/m 4 juli, ...": the year leads and the two
+# days share one month, so parse_date finds nothing.
+_DTRH_DATES = re.compile(
+    r"\b(\d{4}):\s*(\d{1,2})\s*(?:t/m|tot|[-\u2013\u2014])\s*"
+    r"(\d{1,2})\s+([A-Za-z]+)",
+    re.IGNORECASE,
+)
+
+
+def parse_down_the_rabbit_hole(html: str, url: str) -> ConcertInfo:
+    # A festival site whose homepage is the event. Only its description
+    # carries the dates; other pages (tickets, news) would otherwise yield
+    # an unrelated date from their text, so reject them.
+    match = _DTRH_DATES.search(_meta_content(html, "og:description") or "")
+    month = _MONTHS.get(match[4].lower()) if match else None
+    if not match or not month:
+        raise _NotEventPageError
+    year = int(match[1])
+    info = ConcertInfo(
+        url=url,
+        band="Down The Rabbit Hole",
+        venue="Groene Heuvels, Beuningen",
+        date=_safe_date(year, month, int(match[2])),
+        raw_date=match[0],
+    )
+    end = _safe_date(year, month, int(match[3]))
+    if end and info.date and end > info.date:
+        info.end_date = end
+    return info
+
+
 def parse_patronaat(html: str, url: str) -> ConcertInfo:
     info = ConcertInfo(url=url, venue="Patronaat")
     match = re.search(
@@ -705,6 +736,7 @@ PARSERS: dict[str, Callable[[str, str], ConcertInfo]] = {
     "effenaar.nl": _json_ld_with_venue("Effenaar"),
     "ekko.nl": parse_ekko,
     "castlefest.nl": parse_castlefest,
+    "downtherabbithole.nl": parse_down_the_rabbit_hole,
     "patronaat.nl": parse_patronaat,
     "p60.nl": parse_p60,
     "nobel.nl": _meta_parser("Nobel"),
